@@ -1,0 +1,16 @@
+[harness-run-agent.js] --- Saving user changes before agent run ---
+[harness-run-agent.js] Saved: Save user changes: Claude_Code_Harness/README.md                      | 30 ++++++++++++----------
+[harness-run-agent.js] Continuing topic "claude_harness" pipeline "code-assess-fix" from phase "coding" (index 0).
+[harness-run-agent.js] === Pipeline: coding → assessment → fix ===
+[harness-run-agent.js] --- Phase: coding ---
+
+[coding-agent] Still working...
+
+[harness-run-agent.js] ERROR: Phase 1 (coding) failed: Claude exited with code 129
+[schedule-models-refresh] Weekly task "ClaudeHarnessModelsRefresh" registered — first run 2026-06-07T03:00:00, then every Sunday.
+[harness-run-agent.js] --- Saving user changes before agent run ---
+[harness-run-agent.js] Saved: Save user changes: Claude_Code_Harness/README.md                      | 10 +++
+[harness-run-agent.js] Continuing topic "claude_harness" pipeline "all" from phase "fix" (index 3).
+[harness-run-agent.js] === Pipeline: planning → coding → assessment → fix ===
+[harness-run-agent.js] --- Phase: fix (remediation) ---
+[harness-run-agent.js] ERROR: Phase 4 (fix) failed: spawn claude ENOENT

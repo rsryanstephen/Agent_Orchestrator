@@ -1,0 +1,614 @@
+2026-06-01 09:57:30.460 +02:00	
+Possible Values Cache - Job 6a4ed30b-5cf3-4078-9976-dec79be734ec finished — 92 fields persisted, 11 failures.
+2026-06-01 09:57:30.459 +02:00	
+Possible Values Cache - Job 6a4ed30b-5cf3-4078-9976-dec79be734ec status → Completed (processed=92, failed=11).
+2026-06-01 09:57:30.458 +02:00	
+Possible Values Cache - Refresh complete — 89 entries loaded.
+2026-06-01 09:57:30.454 +02:00	
+Possible Values Cache - Refresh starting.
+2026-06-01 09:57:30.453 +02:00	
+Possible Values Cache - Upsert pass complete — 92 field(s) persisted, 11 error(s).
+2026-06-01 09:57:30.451 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="forbearance_forbexitdescription", resultCount=11
+2026-06-01 09:57:30.446 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.438 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="forbearance_forbexitdescription", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.434 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_usda"'.
+2026-06-01 09:57:30.425 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_usda", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.421 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_topservicer", resultCount=200
+2026-06-01 09:57:30.417 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.410 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_topservicer", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.407 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_topissuer", resultCount=200
+2026-06-01 09:57:30.403 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.394 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_topissuer", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.393 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_tba"'.
+2026-06-01 09:57:30.387 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_tba", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.386 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_geo"'.
+2026-06-01 09:57:30.380 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_geo", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.378 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="selling_servicer_entitytype", resultCount=3
+2026-06-01 09:57:30.374 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.366 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="selling_servicer_entitytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.363 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="buying_servicer_entitytype", resultCount=3
+2026-06-01 09:57:30.359 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.352 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="buying_servicer_entitytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.349 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_serviceratissuance", resultCount=200
+2026-06-01 09:57:30.345 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.336 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_serviceratissuance", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.333 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_securitymnemonic", resultCount=200
+2026-06-01 09:57:30.329 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.320 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_securitymnemonic", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.317 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_seasonalitycode", resultCount=1
+2026-06-01 09:57:30.313 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.305 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_seasonalitycode", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.304 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_relo"'.
+2026-06-01 09:57:30.299 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_relo", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.296 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_propertytype", resultCount=7
+2026-06-01 09:57:30.292 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.285 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_propertytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.282 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_status", resultCount=2
+2026-06-01 09:57:30.277 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.269 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_status", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.266 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="partial_paydown_flag", resultCount=3
+2026-06-01 09:57:30.262 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.254 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="partial_paydown_flag", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.253 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_mha"'.
+2026-06-01 09:57:30.247 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_mha", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.244 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_seller_entitytype", resultCount=3
+2026-06-01 09:57:30.240 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.232 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_seller_entitytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.228 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_product", resultCount=104
+2026-06-01 09:57:30.224 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.216 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_product", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.212 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_poolnumber", resultCount=200
+2026-06-01 09:57:30.208 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.200 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_poolnumber", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.198 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_cusip", resultCount=200
+2026-06-01 09:57:30.193 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.185 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_cusip", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.184 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_loanbal"'.
+2026-06-01 09:57:30.178 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_loanbal", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.177 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"level"'.
+2026-06-01 09:57:30.171 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="level", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.169 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_ltv"'.
+2026-06-01 09:57:30.163 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_ltv", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.162 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_investor"'.
+2026-06-01 09:57:30.156 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_investor", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.154 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_buydownstatusflagatissuance", resultCount=3
+2026-06-01 09:57:30.150 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.141 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_buydownstatusflagatissuance", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.140 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"speccollat_fico"'.
+2026-06-01 09:57:30.134 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="speccollat_fico", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.130 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_embsproductsupertype", resultCount=1
+2026-06-01 09:57:30.126 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.118 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_embsproductsupertype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.115 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_servicer_entitytype", resultCount=3
+2026-06-01 09:57:30.111 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.103 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_servicer_entitytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.100 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_coupontype", resultCount=2
+2026-06-01 09:57:30.096 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.081 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_coupontype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.079 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_collateraltype", resultCount=3
+2026-06-01 09:57:30.075 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.066 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_collateraltype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.064 +02:00	
+Possible Values Cache - Failed to get/persist possible values for field '"label"'.
+2026-06-01 09:57:30.059 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="label", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.056 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_agencycode", resultCount=4
+2026-06-01 09:57:30.052 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.044 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_agencycode", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.041 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="arm_harmtype", resultCount=15
+2026-06-01 09:57:30.036 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.028 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="arm_harmtype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.024 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="arm_indexdescription", resultCount=30
+2026-06-01 09:57:30.019 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:30.009 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="arm_indexdescription", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:30.000 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="lpt_unique_in_pool", resultCount=8
+2026-06-01 09:57:29.996 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.988 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="lpt_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.985 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="ot_unique_in_pool", resultCount=5
+2026-06-01 09:57:29.981 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.962 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="ot_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.959 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_specialeligibilityprogramtype", resultCount=8
+2026-06-01 09:57:29.955 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.946 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_specialeligibilityprogramtype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.943 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_specialeligibility", resultCount=5
+2026-06-01 09:57:29.939 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.932 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_specialeligibility", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.929 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_subseller", resultCount=200
+2026-06-01 09:57:29.924 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.916 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_subseller", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.914 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="pool_benchmark", resultCount=7
+2026-06-01 09:57:29.910 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.902 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="pool_benchmark", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.899 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_gov_6m_int", resultCount=8
+2026-06-01 09:57:29.895 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.888 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_gov_6m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.884 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_gov_24m_int", resultCount=9
+2026-06-01 09:57:29.880 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.872 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_gov_24m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.869 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_gov_1m_int", resultCount=7
+2026-06-01 09:57:29.864 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.857 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_gov_1m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.854 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_gov_12m_int", resultCount=8
+2026-06-01 09:57:29.849 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.841 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_gov_12m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.838 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_conv_6m_int", resultCount=9
+2026-06-01 09:57:29.730 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.722 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_conv_6m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.718 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_conv_24m_int", resultCount=9
+2026-06-01 09:57:29.610 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.602 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_conv_24m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.599 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_conv_1m_int", resultCount=9
+2026-06-01 09:57:29.490 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.479 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_conv_1m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.475 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_conv_12m_int", resultCount=9
+2026-06-01 09:57:29.367 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.358 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_conv_12m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.355 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_6m_int", resultCount=9
+2026-06-01 09:57:29.250 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.243 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_6m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.239 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_24m_int", resultCount=9
+2026-06-01 09:57:29.132 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.122 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_24m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.118 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_1m_int", resultCount=9
+2026-06-01 09:57:29.012 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:29.003 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_1m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:29.000 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="peer_group_12m_int", resultCount=9
+2026-06-01 09:57:28.894 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.886 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="peer_group_12m_int", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.883 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="latest_transfer_date_year_quarter", resultCount=172
+2026-06-01 09:57:28.773 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.766 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="latest_transfer_date_year_quarter", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.762 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conv_bap", resultCount=6
+2026-06-01 09:57:28.626 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.617 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conv_bap", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.614 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conv_adr", resultCount=5
+2026-06-01 09:57:28.479 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.470 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conv_adr", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.466 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="collat", resultCount=33
+2026-06-01 09:57:28.244 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.236 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="collat", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.232 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_state", resultCount=57
+2026-06-01 09:57:28.038 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:28.030 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_state", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:28.026 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="selling_servicer", resultCount=200
+2026-06-01 09:57:27.822 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:27.815 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="selling_servicer", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:27.810 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="buying_servicer", resultCount=200
+2026-06-01 09:57:27.477 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:27.468 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="buying_servicer", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:27.464 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="seller_category", resultCount=9
+2026-06-01 09:57:27.257 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:27.250 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="seller_category", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:27.246 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_riskfactors", resultCount=2
+2026-06-01 09:57:27.078 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:27.071 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_riskfactors", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:27.068 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_riskfactortype", resultCount=8
+2026-06-01 09:57:26.897 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:26.887 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_riskfactortype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:26.884 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_removalreason", resultCount=7
+2026-06-01 09:57:26.749 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:26.741 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_removalreason", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:26.737 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_refinancetype", resultCount=6
+2026-06-01 09:57:26.566 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:26.532 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_refinancetype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:26.529 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_propertyvaluedescription", resultCount=7
+2026-06-01 09:57:26.339 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:26.329 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_propertyvaluedescription", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:26.326 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_programtype", resultCount=2
+2026-06-01 09:57:26.134 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:26.124 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_programtype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:26.120 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="prefix_ticker", resultCount=119
+2026-06-01 09:57:25.924 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:25.915 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="prefix_ticker", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:25.912 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_prefix", resultCount=171
+2026-06-01 09:57:25.723 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:25.713 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_prefix", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:25.709 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_occupancytype", resultCount=4
+2026-06-01 09:57:25.521 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:25.512 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_occupancytype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:25.509 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="note_rate_band", resultCount=51
+2026-06-01 09:57:25.280 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:25.272 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="note_rate_band", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:25.268 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_seller", resultCount=200
+2026-06-01 09:57:24.985 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:24.976 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_seller", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:24.972 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_issuedate_year_quarter", resultCount=171
+2026-06-01 09:57:24.863 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:24.853 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_issuedate_year_quarter", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:24.850 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_coupontype", resultCount=2
+2026-06-01 09:57:24.672 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:24.664 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_coupontype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:24.661 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="securityperiodic_coupon_band", resultCount=30
+2026-06-01 09:57:24.434 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:24.425 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="securityperiodic_coupon_band", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:24.422 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="ltv_band_loan", resultCount=13
+2026-06-01 09:57:24.185 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:24.176 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="ltv_band_loan", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:24.173 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_purposetype", resultCount=10
+2026-06-01 09:57:23.953 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.944 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_purposetype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.940 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_loanpurpose", resultCount=5
+2026-06-01 09:57:23.724 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.715 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_loanpurpose", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.712 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="balance_band_original_loan_amount", resultCount=9
+2026-06-01 09:57:23.489 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.481 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="balance_band_original_loan_amount", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.477 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_loanage_band", resultCount=8
+2026-06-01 09:57:23.321 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.312 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_loanage_band", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.309 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_lastdelinquentmonths", resultCount=7
+2026-06-01 09:57:23.180 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.172 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_lastdelinquentmonths", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.169 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_highdelinquentmonths", resultCount=7
+2026-06-01 09:57:23.041 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:23.033 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_highdelinquentmonths", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:23.029 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_delinquentmonths", resultCount=8
+2026-06-01 09:57:22.906 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.898 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_delinquentmonths", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.895 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_governmentagency", resultCount=5
+2026-06-01 09:57:22.745 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.735 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_governmentagency", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.732 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_firsttimehomebuyerflag", resultCount=3
+2026-06-01 09:57:22.547 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.539 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_firsttimehomebuyerflag", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.535 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="forbearance_forbtype", resultCount=4
+2026-06-01 09:57:22.416 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.407 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="forbearance_forbtype", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.404 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="forbearance_status", resultCount=3
+2026-06-01 09:57:22.288 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.280 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="forbearance_status", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.277 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_firstpaymentdate_year_quarter", resultCount=197
+2026-06-01 09:57:22.162 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:22.153 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_firstpaymentdate_year_quarter", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:22.150 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="credit_score_band", resultCount=13
+2026-06-01 09:57:21.907 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:21.898 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="credit_score_band", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:21.895 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="dti_band_loan", resultCount=10
+2026-06-01 09:57:21.670 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:21.661 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="dti_band_loan", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:21.658 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_dpaflag", resultCount=3
+2026-06-01 09:57:21.521 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:21.512 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_dpaflag", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:21.508 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_servicer", resultCount=200
+2026-06-01 09:57:21.230 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:21.220 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_servicer", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:21.217 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="cpr_band", resultCount=21
+2026-06-01 09:57:21.067 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:21.059 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="cpr_band", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:21.055 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conv_lastdelinquentstatus", resultCount=25
+2026-06-01 09:57:20.934 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.925 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conv_lastdelinquentstatus", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.921 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conv_highdelinquentstatus", resultCount=25
+2026-06-01 09:57:20.797 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.788 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conv_highdelinquentstatus", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.785 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conv_delinquentstatus", resultCount=26
+2026-06-01 09:57:20.648 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.638 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conv_delinquentstatus", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.635 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_conformingloanlimits", resultCount=3
+2026-06-01 09:57:20.475 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.466 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_conformingloanlimits", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.463 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="loanperiodic_tpo", resultCount=7
+2026-06-01 09:57:20.237 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.227 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="loanperiodic_tpo", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.224 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="security_agency", resultCount=3
+2026-06-01 09:57:20.049 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:20.040 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="security_agency", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:20.036 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="lp_unique_in_pool", resultCount=5
+2026-06-01 09:57:19.909 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:19.900 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="lp_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:19.897 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="ot_unique_in_pool", resultCount=5
+2026-06-01 09:57:19.753 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:19.745 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="ot_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:19.741 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="lpt_unique_in_pool", resultCount=8
+2026-06-01 09:57:19.613 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:19.604 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="lpt_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:19.600 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="ga_unique_in_pool", resultCount=6
+2026-06-01 09:57:19.451 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:19.442 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="ga_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:19.438 +02:00	
+Possible Values Cache - GetPossibleValues complete — field="tpo_unique_in_pool", resultCount=8
+2026-06-01 09:57:19.217 +02:00	
+Possible Values Cache - Resolved mapping — table="loan_by_servicer_transfer_non_periods_source", actualTable="loanbyservicertransferview_v8_20260510_1022"
+2026-06-01 09:57:19.210 +02:00	
+Possible Values Cache - GetPossibleValues starting — field="tpo_unique_in_pool", fieldType=String, multiTableSetName=Loan, searchText=""
+2026-06-01 09:57:19.207 +02:00	
+Possible Values Cache - Pool-data template loaded — 2037 pool field(s) identified.
+2026-06-01 09:57:19.187 +02:00	
+Possible Values Cache - Job 6a4ed30b-5cf3-4078-9976-dec79be734ec status → Processing.
+2026-06-01 09:57:19.185 +02:00	
+Possible Values Cache - Processing job 6a4ed30b-5cf3-4078-9976-dec79be734ec.
+2026-06-01 09:57:19.185 +02:00	
+Possible Values Cache - Job 6a4ed30b-5cf3-4078-9976-dec79be734ec enqueued. Tracked job count: 2.

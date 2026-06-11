@@ -1,0 +1,36 @@
+# Agent Orchestrator shell functions.
+# Run from the root of the repo where Agent_Orchestrator/ was placed.
+
+# Topic management
+hstartt()        { \node Agent_Orchestrator/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
+hsett()          { \node Agent_Orchestrator/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
+hrentopic()      { \node Agent_Orchestrator/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
+hrmtopic()       { \node Agent_Orchestrator/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>
+
+# Unified runner — single command for single-topic and parallel runs.
+# Usage: hrun [<id>-]<cmd> [[<id>-]<cmd> ...]
+#   hrun 1-c          # topic 1, coding
+#   hrun 2-caf        # topic 2, code-assess-fix
+#   hrun caf          # last-touched topic, code-assess-fix
+#   hrun 1-c 2-caf    # topic 1 coding AND topic 2 code-assess-fix in parallel
+# Shorthand: p|c|a|f|af|pc|caf|all|pcaf|cont
+hrun()           { \node Agent_Orchestrator/src/run-parallel.js "$@"; }
+
+# hresume [topic|id|all] — manually trigger auto-resume for topics in the wake queue
+# (mostly for testing — this is normally triggered automatically by the OS scheduler at the token-limit reset time).
+hresume()        { \node Agent_Orchestrator/src/auto-resume.js "$@"; }
+
+# Memory (single-file-per-topic — no role argument)
+hclear()         { \node Agent_Orchestrator/src/clear-memory.js "$@"; }    # hclear [topic|id|all]
+hcompress()      { \node Agent_Orchestrator/src/compress-memory.js "$@"; } # hcompress [topic|id|all]
+
+# Prompt-queue maintenance
+# hqregen [topic|id|all] — destructively wipe and re-seed prompt-queue.md for a topic
+hqregen()        { \node Agent_Orchestrator/src/regenerate-queue.js "$@"; }
+
+# Misc
+hupdate-models()   { \node Agent_Orchestrator/src/update-models-reference.js; }  # hupdate-models
+hprobe()           { \node Agent_Orchestrator/src/run-agent.js --probe; }  # hprobe — checks provider auth
+
+# Harness install (idempotent — adds these functions to your rc file if missing)
+# \node Agent_Orchestrator/src/install-shell-functions.js "$@"; [--force]
