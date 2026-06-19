@@ -3064,6 +3064,12 @@ function _playSoundFile(configKey, defaultWav) {
   //      broker process owns the single clarifying chime; brokered children stay
   //      silent. Parent (neither var set) remains sole emitter.
   if (process.env.AGENT_ORCH_TOPIC_DIR_OVERRIDE || process.env.AGENT_ORCH_BROKERED_CHILD) return;
+  // Test/e2e suppression: stubbed harness dispatches use a `__e2e_stub*` topic
+  // and spin up many short-lived processes, each hitting the post-drain
+  // pending===0 gate and firing tada.wav — the repeated burst proven in
+  // .state/auto-resume.log:591-639. Real topics never carry this prefix, so
+  // mute all five events for stub dispatches entirely.
+  if (typeof topic === 'string' && topic.startsWith('__e2e_stub')) return;
   const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
   if (enabled === false) return;
   if (_beepInFlight) return;
@@ -3102,7 +3108,11 @@ function playQueueFetchSound() {
   _playSoundFile('queue-fetch-sound-file', 'notify.wav');
 }
 
-// Event 3 — pipeline complete and session ending.
+// Event 3 — pipeline complete and session ending. The sole call site (:4776)
+// already fires only once per dispatch, after the in-process queue drain returns
+// with queueLength===0 — so no extra once-per-process latch is needed here. A
+// latch was removed because it never reset and would permanently silence a
+// second legitimate completion in any long-lived/re-dispatch process.
 function playCompletionSound() {
   _playSoundFile('completion-sound-file', 'tada.wav');
 }
