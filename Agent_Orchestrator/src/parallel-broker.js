@@ -200,9 +200,9 @@ function createBroker({ runAgentPath, jobs, env = process.env, stdout = process.
         child.once('exit', () => spawnNextSequential());
       }
       process.on('SIGINT', () => {
-        // Interrupt cue: SIGINT received -> play the chime so the user
-        // hears that the parallel broker is tearing down child agents.
-        try { chime(); } catch {}
+        // Removed SIGINT teardown chime to cut audio spam and stay consistent
+        // with the parallel SIGINT branch (which never chimed); the only
+        // remaining broker chime is the clarifying-question cue in enqueueQuestion.
         stderr.write('[broker] SIGINT — forwarding SIGTERM to children\n');
         for (const { child } of childrenByToken.values()) {
           try { child.kill('SIGTERM'); } catch {}

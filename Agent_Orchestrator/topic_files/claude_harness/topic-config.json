@@ -6,8 +6,8 @@
   "auto-answer-clarifying-questions-and-submit": true,
   "models": {
     "planning": "auto",
-    "coding": "claude-opus-4-7",
-    "assessment": "claude-opus-4-7"
+    "coding": "auto",
+    "assessment": "auto"
   },
   "model-effort": {
     "planning": "auto",
@@ -33,11 +33,11 @@
     },
     {
       "path": "Agent_Orchestrator/src/lib/providers",
-      "age": 0
+      "age": 2
     },
     {
-      "path": "Agent_Orchestrator/",
-      "age": 4
+      "path": "Agent_Orchestrator",
+      "age": 0
     }
   ],
   "topic-id": "1",

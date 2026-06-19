@@ -30,6 +30,7 @@ hqregen()        { \node Agent_Orchestrator/src/regenerate-queue.js "$@"; }
 
 # Misc
 hupdate-models()   { \node Agent_Orchestrator/src/update-models-reference.js; }  # hupdate-models
+hfetch-models()    { \node Agent_Orchestrator/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
 hprobe()           { \node Agent_Orchestrator/src/run-agent.js --probe; }  # hprobe — checks provider auth
 
 # Harness install (idempotent — adds these functions to your rc file if missing)

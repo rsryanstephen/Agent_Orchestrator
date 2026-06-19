@@ -40,9 +40,6 @@ const { splitPromptIntoTasks, parsePlanningSubtasks, roleHeaderFor, ROLE_HEADER:
 const { getProvider } = require('./lib/providers/registry');
 const { classifyTokenError } = require('./lib/token-error');
 const { getAdvisorFlags } = require('./lib/advisor-flags');
-// Chime helper — used to play a small tone on interruption signals so the
-// user gets an audible cue when a running pipeline is cancelled mid-flight.
-const { playChime } = require('./sound');
 
 const ROOT = path.join(__dirname, '..', '..');
 const HARNESS = path.join(__dirname, '..');
@@ -63,18 +60,59 @@ const LATEST_OPUS = 'claude-opus-4-7';
 const LATEST_SONNET = 'claude-sonnet-4-6';
 const LATEST_HAIKU = 'claude-haiku-4-5-20251001';
 
-// Per-provider native model tiers for auto-classification.
+// Static fallback tiers used when the model-catalog cache is absent or stale.
 // Keys are the harness provider ids; tiers map to prompt-complexity buckets.
-const PROVIDER_AUTO_MODELS = {
+const _PROVIDER_AUTO_MODELS_STATIC = {
   'claude-code':    { light: LATEST_HAIKU,         medium: LATEST_SONNET,    heavy: LATEST_OPUS },
-  // Copilot CLI GA (Feb 2026) rejects gpt-4o ids; use currently-supported GPT model ids
-  // per user directive ("latest gpt model when github-copilot is the provider").
-  // Tiers: light=gpt-5-mini (fast/cheap), medium/heavy=gpt-5 (top reasoning).
-  'github-copilot': { light: 'gpt-5-mini',          medium: 'gpt-5',          heavy: 'gpt-5' },
+  // Copilot CLI GA (Feb 2026) rejects gpt-4o ids; gpt-5/gpt-5-mini are also unavailable.
+  // gpt-4.1 family is the last confirmed-working GPT tier per user directive.
+  'github-copilot': { light: 'gpt-4.1-mini',        medium: 'gpt-4.1',        heavy: 'gpt-4.1' },
   // Gemini CLI GA: 2.0-flash deprecated; use 2.5-flash for light tier per user directive.
   'gemini':         { light: 'gemini-2.5-flash',   medium: 'gemini-2.5-pro', heavy: 'gemini-2.5-pro' },
   'gemini-vertex':  { light: 'gemini-2.5-flash',   medium: 'gemini-2.5-pro', heavy: 'gemini-2.5-pro' },
 };
+
+// One-time warn + background-fetch flags; reset per process so parallel child processes each warn once.
+let _cacheWarnEmitted = false;
+let _cacheFetchStarted = false;
+
+// Reads .model-catalog-cache.json (written by model-catalog.js / hfetch-models) and
+// returns cached tiers for the given provider if the cache is present and fresher than
+// 30 days. Falls back to the static map entry above — never throws.
+// On cache miss, fires a background resolveProviderTiers call (no-await) to warm the
+// cache for the next invocation, wiring the async auto-fetch path that was previously dead.
+function _loadProviderTiers(providerId) {
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const cachePath = path.join(HARNESS, '.model-catalog-cache.json');
+  try {
+    const raw = fs.readFileSync(cachePath, 'utf8');
+    const cache = JSON.parse(raw);
+    const age = Date.now() - (cache.fetchedAt || 0);
+    if (age <= THIRTY_DAYS_MS) {
+      const entry = cache.providers && cache.providers[providerId];
+      if (entry && entry.tiers) {
+        return entry.tiers;
+      }
+    }
+  } catch (_) {
+    // Cache absent, unreadable, or corrupt — fall through to static.
+  }
+  // Emit warn at most once per process to avoid spamming on every resolveModel/autoClassifyModel call.
+  if (!_cacheWarnEmitted) {
+    _cacheWarnEmitted = true;
+    console.warn('[model-catalog] cache miss — run hfetch-models to warm');
+  }
+  // Wire resolveProviderTiers: kick off background fetch so next run finds a warm cache.
+  // Fire-and-forget — current run uses static fallback; next run uses live-fetched tiers.
+  if (!_cacheFetchStarted) {
+    _cacheFetchStarted = true;
+    try {
+      const { resolveProviderTiers } = require('./lib/model-catalog');
+      resolveProviderTiers(providerId).catch(() => {});
+    } catch (_) {}
+  }
+  return _PROVIDER_AUTO_MODELS_STATIC[providerId] || { light: null, medium: null, heavy: null };
+}
 let CONTEXT_TRUNCATION = 400;
 const touchedDirs = new Set();
 const LOCK_PATH = path.join(__dirname, '..', '.global-config.lock');
@@ -768,7 +806,7 @@ function isModelIdForeignToProvider(modelId, effectiveProvider) {
 
 function resolveModel(configured, promptContent = '') {
   const effectiveProvider = configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code');
-  const providerTiers = PROVIDER_AUTO_MODELS[effectiveProvider] || PROVIDER_AUTO_MODELS['claude-code'];
+  const providerTiers = _loadProviderTiers(effectiveProvider);
   const modelId = resolveModelId(configured);
   if (modelId === 'auto') {
     let resolved = autoClassifyModel(promptContent, effectiveProvider);
@@ -857,7 +895,7 @@ function autoClassifyEffort(content) {
 }
 
 function autoClassifyModel(content, provider) {
-  const tiers = PROVIDER_AUTO_MODELS[provider] || PROVIDER_AUTO_MODELS['claude-code'];
+  const tiers = _loadProviderTiers(provider);
   const score = computePromptScore(content);
   if (score <= 1) return tiers.light;
   if (score <= 5) return tiers.medium;
@@ -891,6 +929,9 @@ function resolveRoleEffort(role) {
 }
 
 function applyPlanningEffortAndModel(planningText) {
+  // Guard: empty planningText causes autoClassifyModel to return the lightest tier
+  // unconditionally, silently downgrading subsequent phases. Skip apply.
+  if (!planningText || !planningText.trim()) return;
   const resolvedEffort = autoClassifyEffort(planningText);
   const resolvedModel = autoClassifyModel(planningText, configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code'));
   const family = modelFamilyName(resolvedModel);
@@ -900,27 +941,29 @@ function applyPlanningEffortAndModel(planningText) {
     fresh['model-effort'] = fresh['model-effort'] || fresh.modelEffort || {};
     if (fresh.modelEffort && fresh.modelEffort !== fresh['model-effort']) delete fresh.modelEffort;
     fresh.models = fresh.models || {};
-    const autoSetModels = [];
-    const autoSetEffort = [];
+    // Capture original values before overwrite so restoreAutoModelFields restores exactly
+    // (e.g. "max" stays "max", not silently replaced with "auto").
+    const origModels = {};
+    const origEffort = {};
     for (const role of ['coding', 'assessment']) {
-      const cur = fresh.models[role];
-      if (!cur || cur === '' || cur === 'auto') { fresh.models[role] = resolvedModel; autoSetModels.push(role); }
-      const curEffort = fresh['model-effort'][role];
-      if (!curEffort || curEffort === '' || curEffort === 'auto') { fresh['model-effort'][role] = resolvedEffort; autoSetEffort.push(role); }
+      origModels[role] = fresh.models[role] != null ? fresh.models[role] : null;
+      origEffort[role] = fresh['model-effort'][role] != null ? fresh['model-effort'][role] : null;
+      fresh.models[role] = resolvedModel;
+      fresh['model-effort'][role] = resolvedEffort;
     }
-    // Track which roles were auto-set so cleanupStaleAutoSetRoles() can restore them
-    // if the process crashes before restoreAutoModelFields() runs.
-    fresh['_harness_auto_set'] = { models: autoSetModels, 'model-effort': autoSetEffort };
+    // Store originals as objects so restore path recovers pre-planning values precisely.
+    fresh['_harness_auto_set'] = { models: origModels, 'model-effort': origEffort };
     configUtils.writeConfig(topicConfigPath, fresh);
   } finally {
     releaseTopicConfigLock(TOPIC_LOCK_PATH);
   }
+  // Mirror unconditional override in in-memory topicConfig.
   topicConfig.modelEffort = topicConfig.modelEffort || {};
-  if (!topicConfig.modelEffort.coding || topicConfig.modelEffort.coding === 'auto') topicConfig.modelEffort.coding = resolvedEffort;
-  if (!topicConfig.modelEffort.assessment || topicConfig.modelEffort.assessment === 'auto') topicConfig.modelEffort.assessment = resolvedEffort;
+  topicConfig.modelEffort.coding = resolvedEffort;
+  topicConfig.modelEffort.assessment = resolvedEffort;
   topicConfig.models = topicConfig.models || {};
-  if (!topicConfig.models.coding || topicConfig.models.coding === 'auto') topicConfig.models.coding = resolvedModel;
-  if (!topicConfig.models.assessment || topicConfig.models.assessment === 'auto') topicConfig.models.assessment = resolvedModel;
+  topicConfig.models.coding = resolvedModel;
+  topicConfig.models.assessment = resolvedModel;
 }
 
 // ── Usage footer ──────────────────────────────────────────────────────────────
@@ -1567,8 +1610,10 @@ const TOPIC_LOCK_PATH = topicConfigPath + '.lock';
       const fresh = configUtils.loadConfig(topicConfigPath);
       const stale = fresh['_harness_auto_set'];
       if (!stale) return;
-      for (const role of (stale.models || [])) { if (fresh.models) fresh.models[role] = 'auto'; if (topicConfig.models) topicConfig.models[role] = 'auto'; }
-      for (const role of (stale['model-effort'] || [])) { if (fresh['model-effort']) fresh['model-effort'][role] = 'auto'; if (topicConfig['model-effort']) topicConfig['model-effort'][role] = 'auto'; }
+      // Support both new format (object {role: origValue}) and legacy array ([role]).
+      const _crashEntries = (bag) => !bag ? [] : (Array.isArray(bag) ? bag.map(r => [r, 'auto']) : Object.entries(bag).map(([r, v]) => [r, v != null ? v : 'auto']));
+      for (const [role, val] of _crashEntries(stale.models)) { if (fresh.models) fresh.models[role] = val; if (topicConfig.models) topicConfig.models[role] = val; }
+      for (const [role, val] of _crashEntries(stale['model-effort'])) { if (fresh['model-effort']) fresh['model-effort'][role] = val; if (topicConfig['model-effort']) topicConfig['model-effort'][role] = val; }
       delete fresh['_harness_auto_set'];
       configUtils.writeConfig(topicConfigPath, fresh);
       log('Cleaned up stale _harness_auto_set marker (previous run did not restore model fields).');
@@ -1583,8 +1628,8 @@ const TOPIC_LOCK_PATH = topicConfigPath + '.lock';
 (() => {
   try {
     const effectiveProvider = configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code');
-    const tiers = PROVIDER_AUTO_MODELS[effectiveProvider];
-    if (!tiers) return;
+    const tiers = _loadProviderTiers(effectiveProvider);
+    if (!tiers || (!tiers.light && !tiers.medium && !tiers.heavy)) return;
     const validIds = new Set([tiers.light, tiers.medium, tiers.heavy]);
     const bag = topicConfig.models;
     if (!bag) return;
@@ -1677,7 +1722,8 @@ function restoreGlobalAutoModelFields() {
 }
 
 function restoreAutoModelFields() {
-  if (originalAutoRoles.models.length === 0 && originalAutoRoles.modelEffort.length === 0) return;
+  // No early-return on empty originalAutoRoles — _harness_auto_set on disk may carry roles
+  // written by applyPlanningEffortAndModel even when all values were non-"auto" at startup.
   try {
     acquireTopicConfigLock(TOPIC_LOCK_PATH);
     try {
@@ -1686,11 +1732,24 @@ function restoreAutoModelFields() {
         return;
       }
       const fresh = configUtils.loadConfig(topicConfigPath);
+      // Union startup snapshot with write-time marker to cover non-"auto" initial values.
+      // Support both new format (object {role: origValue}) and legacy array ([role]).
+      const stale = fresh['_harness_auto_set'] || {};
+      const _staleKeys = (bag) => !bag ? [] : (Array.isArray(bag) ? bag : Object.keys(bag));
+      const _staleVal = (bag, role) => !bag || Array.isArray(bag) ? 'auto' : (bag[role] != null ? bag[role] : 'auto');
+      const rolesToRestore = {
+        models: new Set([...(originalAutoRoles.models || []), ..._staleKeys(stale.models)]),
+        modelEffort: new Set([...(originalAutoRoles.modelEffort || []), ..._staleKeys(stale['model-effort'])]),
+      };
+      const hasWork = rolesToRestore.models.size > 0 || rolesToRestore.modelEffort.size > 0 || Object.keys(stale).length > 0;
+      if (!hasWork) return;
       for (const key of ['models', 'model-effort']) {
         const bag = fresh[key] || fresh[configUtils.kebabToCamel(key)];
         if (!bag) continue;
         const camelKey = key === 'model-effort' ? 'modelEffort' : key;
-        for (const role of originalAutoRoles[camelKey]) bag[role] = 'auto';
+        const staleValues = key === 'models' ? stale.models : stale['model-effort'];
+        // Restore to stored original value; falls back to "auto" for originalAutoRoles-only roles.
+        for (const role of rolesToRestore[camelKey]) bag[role] = _staleVal(staleValues, role);
       }
       delete fresh['_harness_auto_set'];
       configUtils.writeConfig(topicConfigPath, fresh);
@@ -2447,13 +2506,17 @@ function playNotificationSound() {
   if (_beepInFlight) return;
   try {
     if (process.platform === 'win32') {
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'notification-sound-file', 'C:\\Windows\\Media\\chimes.wav') || '').trim();
+      // Clarifying-question chime now config-driven via `clarifying-sound-file`
+      // (default `Windows Notify Calendar.wav`); hardcoded default acts as the
+      // fallback when the key is absent. Renamed from `notification-sound-file`
+      // per per-notification configurability requirement.
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'clarifying-sound-file', 'C:\\Windows\\Media\\Windows Notify Calendar.wav') || '').trim();
       if (!cfgVal) return;
       const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
       if (!fs.existsSync(resolved)) {
         if (!_missingSoundFileWarned) {
           _missingSoundFileWarned = true;
-          log(`notification-sound-file not found: ${resolved} — chime disabled until file exists.`);
+          log(`clarifying-sound-file not found: ${resolved} — chime disabled until file exists.`);
         }
         return;
       }
@@ -2474,7 +2537,8 @@ function playNotificationSound() {
 // pulled from `prompt-queue.md` for dispatch. MUST be a different sound from
 // `playNotificationSound` (which signals clarifying-question + pipeline error)
 // so the user can audibly tell "new work started" from "I need your attention".
-// Defaults to `Windows Notify System Generic.wav` (soft, non-piercing); gated
+// Default changed to `Windows Proximity Notification.wav` per config-driven
+// sound requirement; still overridable via `queue-fetch-sound-file`. Gated
 // by the same `play-notification-sound` config switch so users keep one master
 // mute. Honours `_beepInFlight` to avoid overlapping with an active chime.
 function playQueueFetchSound() {
@@ -2483,7 +2547,7 @@ function playQueueFetchSound() {
   if (_beepInFlight) return;
   try {
     if (process.platform === 'win32') {
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'queue-fetch-sound-file', 'C:\\Windows\\Media\\Windows Notify System Generic.wav') || '').trim();
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'queue-fetch-sound-file', 'C:\\Windows\\Media\\Windows Proximity Notification.wav') || '').trim();
       if (!cfgVal) return;
       const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
       if (!fs.existsSync(resolved)) {
@@ -2505,6 +2569,79 @@ function playQueueFetchSound() {
       // BEL used by `playNotificationSound`, giving a distinguishable cue.
       process.stdout.write('\x07');
       setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 120);
+    }
+  } catch { _beepInFlight = false; }
+}
+
+// Completion chime: fired once when the final queued prompt's pipeline finishes
+// (queue empty post-drain). MUST differ from clarifying/queue-fetch tones so the
+// user hears "all work done" distinctly. Config-driven via `completion-sound-file`
+// (default `C:\Windows\Media\tada.wav`); hardcoded default is the fallback when
+// the key is absent. Shares the master `play-notification-sound` gate and the
+// `_beepInFlight` latch to avoid overlapping with an active chime.
+function playCompletionSound() {
+  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
+  if (enabled === false) return;
+  if (_beepInFlight) return;
+  try {
+    if (process.platform === 'win32') {
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'completion-sound-file', 'C:\\Windows\\Media\\tada.wav') || '').trim();
+      if (!cfgVal) return;
+      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
+      if (!fs.existsSync(resolved)) {
+        if (!_missingSoundFileWarned) {
+          _missingSoundFileWarned = true;
+          log(`completion-sound-file not found: ${resolved} — completion chime disabled until file exists.`);
+        }
+        return;
+      }
+      _beepInFlight = true;
+      const safePath = resolved.replace(/'/g, "''");
+      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
+      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
+      const clear = () => { _beepInFlight = false; };
+      ps.on('exit', clear);
+      ps.on('error', clear);
+    } else {
+      // POSIX: three quick BELs to distinguish completion from single/double BEL cues.
+      process.stdout.write('\x07');
+      setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 120);
+      setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 240);
+    }
+  } catch { _beepInFlight = false; }
+}
+
+// Token-limit interrupt chime: fired when a SIGINT/SIGHUP cancels the harness
+// mid-wait during a token-limit inline countdown, so the user hears the
+// pipeline was interrupted. Made config-driven via `token-limit-sound-file`
+// (default `Windows Notify Messaging.wav`); the hardcoded default is the
+// fallback when the key is absent. Gated by the same `play-notification-sound`
+// master switch and `_beepInFlight` latch as the sibling chimes.
+function playTokenLimitSound() {
+  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
+  if (enabled === false) return;
+  if (_beepInFlight) return;
+  try {
+    if (process.platform === 'win32') {
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'token-limit-sound-file', 'C:\\Windows\\Media\\Windows Notify Messaging.wav') || '').trim();
+      if (!cfgVal) return;
+      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
+      if (!fs.existsSync(resolved)) {
+        if (!_missingSoundFileWarned) {
+          _missingSoundFileWarned = true;
+          log(`token-limit-sound-file not found: ${resolved} — token-limit chime disabled until file exists.`);
+        }
+        return;
+      }
+      _beepInFlight = true;
+      const safePath = resolved.replace(/'/g, "''");
+      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
+      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
+      const clear = () => { _beepInFlight = false; };
+      ps.on('exit', clear);
+      ps.on('error', clear);
+    } else {
+      process.stdout.write('\x07');
     }
   } catch { _beepInFlight = false; }
 }
@@ -3192,8 +3329,11 @@ async function handleTokenLimitInline(instant, pipelineName, fromPhaseIndex) {
   const detachedFallback = (sig) => {
     signalFired = true;
     // Audible interrupt cue: pipeline was cancelled mid-wait by SIGINT/SIGHUP,
-    // so play the standard chime to surface the interruption to the user.
-    try { playChime(); } catch {}
+    // so play the dedicated token-limit chime to surface the interruption.
+    // Delegates to `playTokenLimitSound` (config key `token-limit-sound-file`,
+    // default `Windows Notify Messaging.wav`) so this shares the master
+    // `play-notification-sound` gate and `_beepInFlight` latch with sibling chimes.
+    try { playTokenLimitSound(); } catch {}
     appendAutoResumeLog(`Signal ${sig} during inline wait — falling back to detached.`);
     let providerSupports = true;
     try { providerSupports = getProvider().capabilities.autoResume !== false; } catch {}
@@ -3756,7 +3896,23 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
     // Capture raw block text BEFORE inject so we can re-queue on failure
     // (preserves header line + body verbatim — `parseBlock` exposes `.raw`).
     const rawBlock = block.raw;
-    injectQueuedPromptIntoHistory(block.body);
+    // Q2 durability guard: dequeueFirstUnheld above already destructively removed
+    // this block from the queue file. injectQueuedPromptIntoHistory is the ONLY
+    // thing that records it in history; if that write throws it would fall through
+    // to the outer catch ("queue left untouched") which is a lie — the block is
+    // already popped, so it would be lost from BOTH queue and history (the literal
+    // "dequeued, never submitted to the history file at all" failure). Re-queue the
+    // raw block at the head on inject failure so the prompt is never silently lost.
+    try {
+      injectQueuedPromptIntoHistory(block.body);
+    } catch (injErr) {
+      try { promptQueue.prependHead(topicDirPath(), rawBlock); }
+      catch (rqErr) { log(`prompt-queue: re-queue after inject failure also failed: ${rqErr.message}`); }
+      appendAutoResumeLog(`dequeueAndTriggerNext: inject-failed branch — restored popped block to queue head, aborting drain. err="${injErr.message}"`);
+      log(`prompt-queue: failed to write popped prompt into history (${injErr.message}) — block restored at head of queue, draining aborted.`);
+      try { playNotificationSound(); } catch {}
+      return;
+    }
     // Audible cue: a new prompt was just fetched from the queue and injected
     // into history. Uses the distinct, innocuous `playQueueFetchSound` (NOT
     // the clarifying/error chime) so the user can tell "new work started"
@@ -3863,12 +4019,14 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
       // the final available prompt). Re-reads queue length post-drain so
       // "all-held" early-return and any held-only remainder do NOT chime —
       // only a genuinely empty queue counts as "last prompt finished".
-      // Reuses `playNotificationSound` (gated by `play-notification-sound`).
+      // Uses dedicated `playCompletionSound` (distinct `completion-sound-file`)
+      // so "all work done" sounds different from clarifying/queue-fetch tones;
+      // still gated by `play-notification-sound`.
       if (_drainGate) {
         let _postDrainPending = -1;
         try { _postDrainPending = promptQueue.queueLength(topicDirPath()); } catch {}
         if (_postDrainPending === 0) {
-          try { playNotificationSound(); appendAutoResumeLog(`dispatch: completion-chime fired (queue empty post-drain pending=${_postDrainPending})`); }
+          try { playCompletionSound(); appendAutoResumeLog(`dispatch: completion-chime fired (queue empty post-drain pending=${_postDrainPending})`); }
           catch (chimeErr) { appendAutoResumeLog(`dispatch: completion-chime failed: ${chimeErr && chimeErr.message}`); }
         } else {
           appendAutoResumeLog(`dispatch: completion-chime skipped (post-drain pending=${_postDrainPending} — not last prompt)`);

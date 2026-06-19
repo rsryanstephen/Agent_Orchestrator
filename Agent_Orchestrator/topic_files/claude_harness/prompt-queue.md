@@ -43,7 +43,7 @@ EXAMPLE (uncomment to use):
 
 (hold)
 
-What if GPT-6 comes out? I want the default model choice to look up the latest availble models and select accordingly from the appropriate provider, caching the options so the lookup is not repeated. Cache can invalidate monthly, with a command to fetch latest models made avaialble (Please update shell functions accordingly).
+We must also create a fallback to another provider when tokens run out. This should happen automatically with a message on the CLI saying "Tokens have run out on your subscription with {provider name}, falling back to {provider name}". Then the usual countdown logic kicks in if no tokens are available on any of the available providers. It refers back to the primary provider and displays the time until tokens are back, then re-initializes automatically when the tokens have arrived. If this is not possible, (If for example, the user does not have a Claude Code subscription which enables this); then the CLI must make clear that an auto-resume is not possible on the available providers: [list providers].
 
 ---
 

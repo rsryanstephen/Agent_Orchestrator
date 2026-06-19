@@ -28,10 +28,10 @@ test('global-config.json default notification-sound-file is Windows chimes.wav',
   assert.strictEqual(cfg['notification-sound-file'], 'C:\\Windows\\Media\\chimes.wav');
 });
 
-test('playNotificationSound fallback default is Windows chimes.wav', () => {
-  const m = src.match(/cfgRead\(topicConfig,\s*config,\s*'notification-sound-file',\s*'([^']+)'\)/);
-  assert.ok(m, 'cfgRead call for notification-sound-file not found');
-  assert.strictEqual(m[1], 'C:\\\\Windows\\\\Media\\\\chimes.wav');
+test('playNotificationSound clarifying fallback default is Windows Notify Calendar.wav', () => {
+  const m = src.match(/cfgRead\(topicConfig,\s*config,\s*'clarifying-sound-file',\s*'([^']+)'\)/);
+  assert.ok(m, 'cfgRead call for clarifying-sound-file not found');
+  assert.strictEqual(m[1], 'C:\\\\Windows\\\\Media\\\\Windows Notify Calendar.wav');
 });
 
 test('bundled assets/notification.wav retained for opt-in', () => {

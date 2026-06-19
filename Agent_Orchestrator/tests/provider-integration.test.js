@@ -131,8 +131,8 @@ test('(PI8) History-file role headers contain no provider-specific names', () =>
 test('(PI9) PROVIDER_AUTO_MODELS: github-copilot tiers are GPT model IDs, not Claude', () => {
   const src = fs.readFileSync(path.join(HARNESS, 'src', 'run-agent.js'), 'utf8');
   // Extract the PROVIDER_AUTO_MODELS literal block.
-  const m = src.match(/const PROVIDER_AUTO_MODELS\s*=\s*(\{[\s\S]*?\n\};)/);
-  assert.ok(m, 'PROVIDER_AUTO_MODELS constant must exist in run-agent.js');
+  const m = src.match(/const _PROVIDER_AUTO_MODELS_STATIC\s*=\s*(\{[\s\S]*?\n\};)/);
+  assert.ok(m, '_PROVIDER_AUTO_MODELS_STATIC constant must exist in run-agent.js');
   // Eval is safe here — run-agent constants are static literals in a test context.
   // Extract copilot entry via regex instead of eval to avoid side effects.
   const copilotMatch = src.match(/'github-copilot'\s*:\s*\{\s*light:\s*'([^']+)'\s*,\s*medium:\s*'([^']+)'\s*,\s*heavy:\s*'([^']+)'/);
@@ -250,9 +250,16 @@ test('(PI13-runtime) restoreAutoModelFields writes "auto" to config and removes 
 test('(PI14-runtime) resolveModel falls back to provider-native medium tier (not LATEST_SONNET) for github-copilot', () => {
   const RUN_AGENT_SRC = fs.readFileSync(path.join(HARNESS, 'src', 'run-agent.js'), 'utf8');
 
+  // Extract LATEST_* constants + _PROVIDER_AUTO_MODELS_STATIC block (renamed from PROVIDER_AUTO_MODELS).
   const constStart = RUN_AGENT_SRC.indexOf('const LATEST_OPUS =');
-  const pamBlockEnd = RUN_AGENT_SRC.indexOf('\n};', RUN_AGENT_SRC.indexOf('const PROVIDER_AUTO_MODELS =')) + 3;
+  const pamMarker = RUN_AGENT_SRC.indexOf('const _PROVIDER_AUTO_MODELS_STATIC =');
+  const pamBlockEnd = RUN_AGENT_SRC.indexOf('\n};', pamMarker) + 3;
   const constSrc = RUN_AGENT_SRC.slice(constStart, pamBlockEnd).trim();
+
+  // Extract _loadProviderTiers (depends on fs, path, HARNESS, require, _PROVIDER_AUTO_MODELS_STATIC).
+  const lptStart = RUN_AGENT_SRC.indexOf('\nfunction _loadProviderTiers(');
+  const lptEnd = RUN_AGENT_SRC.indexOf('\nlet CONTEXT_TRUNCATION =', lptStart);
+  const lptSrc = RUN_AGENT_SRC.slice(lptStart, lptEnd).trim();
 
   const rmiStart = RUN_AGENT_SRC.indexOf('function resolveModelId(');
   const rmiEnd = RUN_AGENT_SRC.indexOf('\nfunction applyRateLimitDowngrade(', rmiStart);
@@ -262,23 +269,33 @@ test('(PI14-runtime) resolveModel falls back to provider-native medium tier (not
   const rmEnd = RUN_AGENT_SRC.indexOf('\nfunction modelFamilyName(', rmStart);
   const rmSrc = RUN_AGENT_SRC.slice(rmStart, rmEnd).trim();
 
-  const factory = new Function(
-    'topicConfig', 'config', 'configUtils',
-    'autoClassifyModel', 'applyRateLimitDowngrade', 'modelFamilyName',
-    `${constSrc}\n${rmiSrc}\n${rmSrc}\nreturn resolveModel;`
-  );
+  // Mock fs (simulate cache miss so static fallback is exercised), path, require.
+  const fakeFs = { readFileSync: () => { throw new Error('no cache'); } };
+  const fakePath = { join: (...args) => args.join('/') };
+  const fakeRequire = () => ({ resolveProviderTiers: () => Promise.resolve() });
   const fakeConfigUtils = { cfgRead: (tc, c, key, def) => tc[key] || c[key] || def };
+
+  const factory = new Function(
+    'topicConfig', 'config', 'configUtils', 'fs', 'path', 'HARNESS', 'require',
+    'autoClassifyModel', 'applyRateLimitDowngrade', 'modelFamilyName',
+    [
+      'let _cacheWarnEmitted = false; let _cacheFetchStarted = false;',
+      constSrc, lptSrc, rmiSrc, rmSrc,
+      'return resolveModel;',
+    ].join('\n')
+  );
+
   const resolveModel = factory(
     { provider: 'github-copilot' }, {},
-    fakeConfigUtils,
+    fakeConfigUtils, fakeFs, fakePath, '/fake-harness', fakeRequire,
     () => { throw new Error('autoClassifyModel must not be called on non-auto path'); },
     () => { throw new Error('applyRateLimitDowngrade must not be called on non-auto path'); },
     () => { throw new Error('modelFamilyName must not be called on non-auto path'); }
   );
 
   const result = resolveModel('', '');
-  assert.deepStrictEqual(result.modelArgs, ['--model', 'gpt-5'],
-    'github-copilot with no model must fall back to provider medium tier (gpt-5), not LATEST_SONNET');
+  assert.deepStrictEqual(result.modelArgs, ['--model', 'gpt-4.1'],
+    'github-copilot with no model must fall back to provider medium tier (gpt-4.1), not LATEST_SONNET');
   assert.strictEqual(result.fallbackNote, null, 'fallbackNote must be null for empty configured string');
 });
 
