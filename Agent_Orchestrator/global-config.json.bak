@@ -71,7 +71,7 @@
   "show-usage-stats": true,
   "stream-output": true,
   "streaming-heartbeat-ms": 5000,
-  "// play-notification-sound": "Play a short gentle chime (`.wav` via `Media.SoundPlayer`) when the harness pauses for clarifying-question reply. Falls back to BEL on non-Windows. Set false to silence all harness sounds.",
+  "// play-notification-sound": "Master on/off gate for all harness sounds. When false, silences ALL five sound events: clarifying-question reply, queue-fetch, pipeline completion, token-limit, and error. Sounds play only on Windows (`.wav` via `Media.SoundPlayer`); non-win32 stays silent.",
   "play-notification-sound": true,
   "// promptQueue.autoAdvance": "When true (default), the post-pipeline hook dequeues and dispatches the head block of `topic_files/<topic>/prompt-queue.md` as the next run. When false, the harness logs the pending count and waits for the user's `:queue-next` (or `:qn`) command.",
   "promptQueue.autoAdvance": true,
