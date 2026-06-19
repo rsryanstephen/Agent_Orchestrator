@@ -1,0 +1,8 @@
+{"text":"plan body alpha","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"coding reply alpha","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"plan body beta","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"coding reply beta","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"plan body gamma","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"coding reply gamma","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"plan body delta","usage":{"input_tokens":1,"output_tokens":1}}
+{"text":"coding reply delta","usage":{"input_tokens":1,"output_tokens":1}}

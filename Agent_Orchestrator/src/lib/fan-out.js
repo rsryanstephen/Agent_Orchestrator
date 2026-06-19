@@ -68,4 +68,17 @@ function parsePlanningSubtasks(planText) {
   return tasks;
 }
 
-module.exports = { splitPromptIntoTasks, parsePlanningSubtasks, roleHeaderFor, ROLE_HEADER };
+// Pure reducer for the module-level `plannedSubtasks` state in run-agent.js.
+// Contract: the return value IS the new value of `plannedSubtasks` for this
+// planning round. By making the reducer return null when the plan has no
+// `## Parallel Tasks` section (instead of leaving the prior value untouched),
+// callers can assign unconditionally — `plannedSubtasks = nextPlannedSubtasksFromPlan(text)` —
+// which structurally prevents the round-N-to-round-N+1 leak that motivated this helper.
+// Tested behaviorally in tests/planning-subtasks-reset.test.js without relying on
+// source-grep of run-agent.js internals.
+function nextPlannedSubtasksFromPlan(planText) {
+  const parsed = parsePlanningSubtasks(planText);
+  return Array.isArray(parsed) && parsed.length >= 2 ? parsed : null;
+}
+
+module.exports = { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER };

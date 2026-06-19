@@ -23,13 +23,63 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 
 const semaphore = require('./parallel-semaphore');
 const fileWriteQueue = require('./file-write-queue');
 
 const STALE_HOURS_DEFAULT = 12;
+
+// Machine-global default slots dir for the cross-process `max-parallel-agents`
+// cap. A fixed path shared by every harness process makes the cap truly
+// cross-topic. Callers may override (e.g. scope it under a single harness root).
+function defaultSlotsDir() {
+  return path.join(os.tmpdir(), 'agent-orch-parallel-slots');
+}
+
+// ── Cross-process history append lock ────────────────────────────────────────
+// The in-process `file-write-queue` serialises appenders WITHIN one process,
+// but multiple `run-agent.js` processes (e.g. several inline token-waits waking
+// at once) can append to the same history file concurrently and tear each
+// other's writes. Replicate the run-agent.js PID-file lock (acquireFileLock,
+// lines 187-208) here so every appender — in any process — contends on the same
+// `historyPath + '.lock'`. Best-effort: on timeout we proceed without the lock
+// rather than crash, since dropping the append would lose agent output.
+function _sleepMs(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy-wait — short, lock-contention only */ }
+}
+function _acquireHistoryLock(targetPath) {
+  const lockPath = targetPath + '.lock';
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      return lockPath;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // Reap a stale lock whose owner PID is gone, then retry.
+      try {
+        const ownerPid = parseInt(fs.readFileSync(lockPath, 'utf8'), 10);
+        try { process.kill(ownerPid, 0); } catch { try { fs.unlinkSync(lockPath); } catch {} continue; }
+      } catch {}
+      _sleepMs(100);
+    }
+  }
+  return null; // timed out — caller appends unlocked rather than lose the write
+}
+function _releaseHistoryLock(lockPath) {
+  if (!lockPath) return;
+  try { fs.unlinkSync(lockPath); } catch {}
+}
+// Serialise a synchronous history append under the cross-process lock.
+function _appendHistoryLocked(historyPath, text) {
+  const lock = _acquireHistoryLock(historyPath);
+  try { fs.appendFileSync(historyPath, text, 'utf8'); }
+  finally { _releaseHistoryLock(lock); }
+}
 
 function slugify(text, fallback = 'task') {
   const s = String(text || '')
@@ -132,9 +182,20 @@ function listStagingEntries(topicDir) {
 function spliceStagingSync(historyPath, topicDir, spliceState) {
   const entries = listStagingEntries(topicDir);
   const bySeq = new Map(entries.map(e => [e.seqIndex, e]));
-  while (true) {
+  // Highest staged sequence index present this pass. Bounds the hole-skip below
+  // so the cursor cannot run away past the last real entry.
+  const maxSeq = entries.length ? Math.max(...entries.map(e => e.seqIndex)) : -1;
+  // FIFO walk with hole-skipping: a (hold) block occupies a queueIndex slot but
+  // never writes a staging file, leaving a permanent gap. All parallel staging
+  // .md files are written synchronously before any runner starts, so an ABSENT
+  // seq reliably means a hold-block hole (skip it) — never a not-yet-staged
+  // parallel entry. A PRESENT-but-not-done seq is a parallel agent still running
+  // (wait, preserve FIFO). Previously the loop broke on any absent seq, dropping
+  // every non-hold block after an interleaved (hold) from history (prompt loss).
+  while (spliceState.next <= maxSeq) {
     const entry = bySeq.get(spliceState.next);
-    if (!entry || !entry.isDone) break;
+    if (!entry) { spliceState.next++; continue; }
+    if (!entry.isDone) break;
     let promptContent = '';
     try { promptContent = fs.readFileSync(entry.filePath, 'utf8'); } catch {}
     let agentOutput = '';
@@ -143,7 +204,8 @@ function spliceStagingSync(historyPath, topicDir, spliceState) {
     try { prev = fs.readFileSync(historyPath, 'utf8'); } catch {}
     const sep = prev.length && !prev.endsWith('\n') ? '\n' : '';
     const toAppend = `${sep}\n---\n\n${promptContent.trimEnd()}\n\n${agentOutput.trimEnd()}\n`;
-    fs.appendFileSync(historyPath, toAppend, 'utf8');
+    // Cross-process lock so a sibling runner's append cannot interleave.
+    _appendHistoryLocked(historyPath, toAppend);
     try { fs.unlinkSync(entry.filePath); } catch {}
     try { fs.unlinkSync(entry.donePath); } catch {}
     spliceState.next++;
@@ -175,7 +237,8 @@ function recoverStagingOrphans(topicDir, historyPath, queuePath) {
       const sep = prev.length && !prev.endsWith('\n') ? '\n' : '';
       const marker = '\n<!-- interrupted batch — recovered by auto-resume -->\n';
       const toAppend = `${sep}${marker}\n---\n\n${promptContent.trimEnd()}\n\n${agentOutput.trimEnd()}\n`;
-      fs.appendFileSync(historyPath, toAppend, 'utf8');
+      // Cross-process lock so a sibling runner's append cannot interleave.
+      _appendHistoryLocked(historyPath, toAppend);
       try { fs.unlinkSync(entry.filePath); } catch {}
       try { fs.unlinkSync(entry.donePath); } catch {}
       spliced++;
@@ -223,7 +286,8 @@ async function appendConsolidated(historyPath, consolidatedText) {
     let prev = '';
     try { prev = fs.readFileSync(historyPath, 'utf8'); } catch {}
     const sep = prev.endsWith('\n') ? '' : '\n';
-    fs.appendFileSync(historyPath, `${sep}\n${consolidatedText}\n`);
+    // Cross-process lock so a sibling runner's append cannot interleave.
+    _appendHistoryLocked(historyPath, `${sep}\n${consolidatedText}\n`);
   });
 }
 
@@ -298,8 +362,12 @@ function combinedCommit(repoRoot, message) {
  *
  * Returns { results, errors } where results preserves original FIFO order.
  */
-async function runBatch({ entries, topicDir, topicName, maxParallel, runOne, onSlotBlocked }) {
-  const sem = semaphore.getSemaphore(maxParallel);
+async function runBatch({ entries, topicDir, topicName, maxParallel, runOne, onSlotBlocked, slotsDir }) {
+  // Use the cross-process semaphore so the `max-parallel-agents` cap holds
+  // across separately-spawned topic/child processes, not just within this one
+  // (QA FAIL #2). `slotsDir` defaults to a machine-global path shared by every
+  // harness process.
+  const sem = semaphore.createCrossProcessSemaphore(maxParallel, slotsDir || defaultSlotsDir());
   const results = new Array(entries.length);
   const errors = [];
   const tagFor = (slug) => topicName ? `${topicName}/${slug}` : slug;
@@ -350,6 +418,7 @@ async function runParallelQueueBatch({
   useWorktree = false,
   repoRoot = null,
   timestamp,
+  slotsDir = null,
   log = () => {},
 }) {
   sweepStaleParallelDirs(topicDir);
@@ -375,6 +444,7 @@ async function runParallelQueueBatch({
     topicDir,
     topicName,
     maxParallel,
+    slotsDir,
     runOne: async (entry) => {
       fs.mkdirSync(entry.subDir, { recursive: true });
       let wt = null;
@@ -434,8 +504,61 @@ async function runParallelQueueBatch({
   return { dispatched: parallel.length, hold, results, errors };
 }
 
+// ── Real parallel-queue runner ───────────────────────────────────────────────
+// Replaces the former stub (which only wrote `.parallel/<slug>.md` and returned
+// a placeholder — QA FAIL #1). Returns a `runner({entry, subDir})` that spawns a
+// REAL child `run-agent.js` against an ephemeral self-contained sub-topic dir:
+//   1. copy the parent topic-config.json into subDir so the child topic resolves;
+//   2. pre-write the child history (`<slug>.md`) with the queued prompt so the
+//      child reads it as its `## User Prompt`;
+//   3. spawn `node run-agent.js <slug> <pipelineShort>` with
+//      AGENT_ORCH_TOPIC_DIR_OVERRIDE=subDir (config-utils.topicDirFor honours it);
+//   4. on exit, read the child history back and return everything appended AFTER
+//      the pre-written prompt (the agent responses) so the FIFO splicer lands it
+//      in the main history with no prompt duplication.
+// `runAgentPath` is injectable so tests can point the spawn at a fake child
+// script (which honours AGENT_ORCH_TOPIC_DIR_OVERRIDE) instead of a live provider.
+function makeSpawnRunner({ execPath, runAgentPath, pipelineShort = 'all', parentTopicConfigPath = null, extraEnv = {}, log = () => {} } = {}) {
+  return async function spawnRunner({ entry, subDir }) {
+    const childTopic = slugify(entry.slug || entry.header || 'task');
+    try { fs.mkdirSync(subDir, { recursive: true }); } catch {}
+    // (1) self-contained topic-config so the child does not need a topic-ids entry.
+    try {
+      if (parentTopicConfigPath && fs.existsSync(parentTopicConfigPath)) {
+        fs.copyFileSync(parentTopicConfigPath, path.join(subDir, 'topic-config.json'));
+      }
+    } catch (e) { log(`spawnRunner: topic-config copy failed for ${childTopic}: ${e.message}`); }
+    // (2) seed the child history with the queued prompt.
+    const historyFile = path.join(subDir, `${childTopic}.md`);
+    const promptText = `## User Prompt\n\n${entry.body || ''}\n`;
+    try { fs.writeFileSync(historyFile, promptText, 'utf8'); } catch {}
+    // (3) spawn the real child against the override dir.
+    const args = [runAgentPath, childTopic, pipelineShort];
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      try {
+        const child = spawn(execPath, args, {
+          env: { ...process.env, ...extraEnv, AGENT_ORCH_TOPIC_DIR_OVERRIDE: subDir },
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        child.on('exit', finish);
+        child.on('error', (e) => { log(`spawnRunner: child error for ${childTopic}: ${e.message}`); finish(); });
+      } catch (e) { log(`spawnRunner: spawn threw for ${childTopic}: ${e.message}`); finish(); }
+    });
+    // (4) return only the appended responses (prompt already in staging).
+    let full = '';
+    try { full = fs.readFileSync(historyFile, 'utf8'); } catch {}
+    const response = full.startsWith(promptText) ? full.slice(promptText.length).trim() : full.trim();
+    return response || `(no response captured for "${childTopic}")`;
+  };
+}
+
 module.exports = {
   slugify,
+  defaultSlotsDir,
+  makeSpawnRunner,
   partitionBlocks,
   subTopicDir,
   sweepStaleParallelDirs,

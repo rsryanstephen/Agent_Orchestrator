@@ -10,7 +10,10 @@ const fs    = require('fs');
 const path  = require('path');
 
 // Cache file lives two levels above this file: Agent_Orchestrator/.model-catalog-cache.json
-const CACHE_PATH = path.join(__dirname, '..', '..', '.model-catalog-cache.json');
+// Override via MODEL_CATALOG_CACHE_PATH env var (used by tests to inject fixtures
+// without clobbering the real cache).
+const CACHE_PATH = process.env.MODEL_CATALOG_CACHE_PATH
+  || path.join(__dirname, '..', '..', '.model-catalog-cache.json');
 
 // 30-day TTL in milliseconds
 const CACHE_TTL_MS = 2592000000;
@@ -102,11 +105,16 @@ function httpsGet(url, headers) {
 // Per-provider fetch functions — each returns string[] of raw model IDs.
 // ---------------------------------------------------------------------------
 
-// Fetches Anthropic models via the public models API (no key needed for listing).
+// Fetch Anthropic /v1/models — endpoint requires `x-api-key` auth header.
+// Why: prior version omitted the key and triggered `HTTP 401 from /v1/models`
+// on every planning phase; mirror `fetchGeminiModels` by throwing early when
+// the env var is absent so the caller silently falls through to static tiers.
 async function fetchClaudeModels() {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) throw new Error('ANTHROPIC_API_KEY not set — skipping live Claude fetch');
   const body = await httpsGet('https://api.anthropic.com/v1/models', {
     'anthropic-version': '2023-06-01',
-    // Listing endpoint is unauthenticated for public model IDs.
+    'x-api-key': key,
   });
   const json = JSON.parse(body);
   // Response shape: { data: [{ id: string, ... }] }
@@ -275,9 +283,78 @@ async function resolveProviderTiers(providerId, opts) {
 
     return tiers;
   } catch (err) {
-    console.warn(`[model-catalog] live fetch failed for "${providerId}" (${err.message}) — using static fallback`);
+    // Demoted from warn -> debug: missing API keys are an expected fallback path
+    // (e.g. planning phase runs without ANTHROPIC_API_KEY) and the prior 401 noise
+    // misled users into thinking the harness was broken.
+    if (process.env.MODEL_CATALOG_DEBUG) {
+      console.warn(`[model-catalog] live fetch failed for "${providerId}" (${err.message}) — using static fallback`);
+    }
     return fallback;
   }
 }
 
-module.exports = { resolveProviderTiers, fetchAndCache, selectTiers };
+// ---------------------------------------------------------------------------
+// isModelAvailable — synchronous cache lookup. Returns {available, knownList, stale}.
+// Used by run-agent pre-flight to detect a configured model that the provider
+// no longer exposes (e.g. typo `gpt-5.4`) so the caller can coerce to "auto".
+// stale=true means cache is missing/expired/lacks the provider — caller should
+// treat `available` as untrusted and either ensureFreshCache or skip the check.
+// ---------------------------------------------------------------------------
+function isModelAvailable(providerId, modelId) {
+  const cached = readCache();
+  if (!cached || !cached.providers || !cached.providers[providerId]) {
+    return { available: false, knownList: [], stale: true };
+  }
+  const entry = cached.providers[providerId];
+  const knownList = Array.isArray(entry.models) ? entry.models : [];
+  const stale = !cached.fetchedAt || (Date.now() - cached.fetchedAt) >= CACHE_TTL_MS;
+  const available = knownList.includes(modelId);
+  return { available, knownList, stale };
+}
+
+// ---------------------------------------------------------------------------
+// ensureFreshCache — guarantees the cache has a recent entry for providerId
+// before the caller proceeds. Triggers `resolveProviderTiers` if missing/stale,
+// bounded by syncTimeoutMs so we never block spawn on a slow network. On
+// timeout/fetch failure returns {stale:true} so the caller can treat the
+// availability check as inconclusive (do NOT block — fall through to existing
+// behavior).
+// ---------------------------------------------------------------------------
+async function ensureFreshCache(providerId, opts) {
+  opts = opts || {};
+  const syncTimeoutMs = typeof opts.syncTimeoutMs === 'number' ? opts.syncTimeoutMs : 2500;
+  const cached = readCache();
+  const hasFresh = cached
+    && cached.fetchedAt
+    && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS
+    && cached.providers
+    && cached.providers[providerId]
+    && Array.isArray(cached.providers[providerId].models)
+    && cached.providers[providerId].models.length > 0;
+  if (hasFresh) return { stale: false, refreshed: false };
+  try {
+    let timer;
+    const timeout = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error(`ensureFreshCache timeout after ${syncTimeoutMs}ms`)), syncTimeoutMs);
+    });
+    const tiers = await Promise.race([resolveProviderTiers(providerId), timeout]);
+    clearTimeout(timer);
+    return { stale: false, refreshed: true, tiers };
+  } catch (err) {
+    return { stale: true, refreshed: false, reason: err.message };
+  }
+}
+
+// Synchronous lookup of the cached tier id for (providerId, tier). Used by
+// the prompt-queue header tokenizer to map a family keyword (e.g. `opus`,
+// `flash`) to a concrete cached model id without awaiting a fetch. Returns
+// null when the cache is missing/empty or the requested tier is absent.
+function getCachedTier(providerId, tier) {
+  const cached = readCache();
+  if (!cached || !cached.providers || !cached.providers[providerId]) return null;
+  const tiers = cached.providers[providerId].tiers;
+  if (!tiers || !tiers[tier]) return null;
+  return tiers[tier];
+}
+
+module.exports = { resolveProviderTiers, fetchAndCache, selectTiers, isModelAvailable, ensureFreshCache, getCachedTier };

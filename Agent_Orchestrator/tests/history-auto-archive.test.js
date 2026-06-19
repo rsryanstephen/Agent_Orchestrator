@@ -33,7 +33,7 @@ function buildArchiveFn(threshold) {
   const factory = new Function(
     'fs', 'path', 'log', 'config', 'HISTORY_ARCHIVE_CLEAR_MARKER',
     'DEFAULT_HISTORY_ARCHIVE_THRESHOLD',
-    `${FN_SRC}; return maybeAutoArchiveHistory;`
+    `${FN_SRC}\n; return maybeAutoArchiveHistory;`
   );
   return factory(fs, path, () => {}, fakeConfig, CLEAR_MARKER, threshold);
 }

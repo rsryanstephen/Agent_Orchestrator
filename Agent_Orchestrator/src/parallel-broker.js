@@ -10,11 +10,16 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const path = require('path');
 const { createReplyAccumulator } = require('./reply-parser');
-const { playChime } = require('./sound');
+// Sound-helper import switched from `playChime` to `playClarifyingSound` so
+// the broker's question-ready chime uses the dedicated clarifying-question
+// tone (user-response-needed event), not the generic notification chime.
+const { playClarifyingSound } = require('./sound');
 
 // Factory: per-broker instance owns FIFO question queue, active prompt state,
 // child handles, and stdin raw-mode arming. Returns { start, ...test hooks }.
-function createBroker({ runAgentPath, jobs, env = process.env, stdout = process.stdout, stderr = process.stderr, stdin = process.stdin, chime = playChime, log: customLog } = {}) {
+// `chime` default switched to `playClarifyingSound` so `enqueueQuestion` plays
+// the clarifying-question tone instead of the generic chime.
+function createBroker({ runAgentPath, jobs, env = process.env, stdout = process.stdout, stderr = process.stderr, stdin = process.stdin, chime = playClarifyingSound, log: customLog } = {}) {
   const log = customLog || ((msg) => stdout.write(`[broker] ${msg}\n`));
   const pendingQuestions = []; // FIFO: {token, topic, role, questionsText, child}
   const childrenByToken = new Map();
@@ -34,9 +39,14 @@ function createBroker({ runAgentPath, jobs, env = process.env, stdout = process.
   // ---------- Child lifecycle: spawn with IPC, prefix-fan output, route messages, track exits ----------
   function spawnChild(job) {
     const args = job.id ? [runAgentPath, job.id, job.cmd] : [runAgentPath, job.cmd];
+    // Tag every brokered child with AGENT_ORCH_BROKERED_CHILD so its in-process
+    // notification chimes are muted (run-agent.js _playSoundFile guard). The
+    // broker is the single sound emitter for a parallel run — without this flag,
+    // N concurrent children each beeped on their own queue-fetch/completion/
+    // clarifying/error events while all were busy, producing the stray-beep storm.
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      env,
+      env: { ...env, AGENT_ORCH_BROKERED_CHILD: '1' },
       windowsHide: true,
     });
     const label = `[${job.token}]`;
@@ -200,9 +210,9 @@ function createBroker({ runAgentPath, jobs, env = process.env, stdout = process.
         child.once('exit', () => spawnNextSequential());
       }
       process.on('SIGINT', () => {
-        // Removed SIGINT teardown chime to cut audio spam and stay consistent
-        // with the parallel SIGINT branch (which never chimed); the only
-        // remaining broker chime is the clarifying-question cue in enqueueQuestion.
+        // SIGINT chime removed: only the five allowed events (user-response-
+        // needed, queue-pickup, session-end, token-wait, error-stop) should
+        // emit a sound. Interrupt teardown is no longer one of them.
         stderr.write('[broker] SIGINT — forwarding SIGTERM to children\n');
         for (const { child } of childrenByToken.values()) {
           try { child.kill('SIGTERM'); } catch {}

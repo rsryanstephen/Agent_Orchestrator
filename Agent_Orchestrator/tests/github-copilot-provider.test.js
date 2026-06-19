@@ -708,6 +708,52 @@ test('parseStream: GA session.error quota -> error event with code error_quota',
   }
 });
 
+// ── spawnCopilot: copilot-cli-settings memory prefix ──────────────────────────
+
+// Helper: write a temp config JSON, run spawnCopilot with _spawn injection,
+// capture the -p argument, clean up. Returns the captured prompt string.
+function runSpawnWithConfig(cfgObj, prompt) {
+  const tmpCfg = path.join(os.tmpdir(), `copilot-test-cfg-${process.hrtime.bigint()}.json`);
+  fs.writeFileSync(tmpCfg, JSON.stringify(cfgObj), 'utf8');
+  let captured = null;
+  try {
+    const fakeChild = makeFakeChild();
+    provider.spawnCopilot({
+      prompt,
+      silent: true,
+      _spawn: (_bin, args) => { captured = args; return fakeChild; },
+      _configPath: tmpCfg,
+    });
+  } finally {
+    try { fs.unlinkSync(tmpCfg); } catch {}
+    provider._clearHooks();
+  }
+  const pIdx = captured ? captured.indexOf('-p') : -1;
+  return pIdx >= 0 ? captured[pIdx + 1] : null;
+}
+
+test('spawnCopilot: copilot-cli-settings memory:"on" prefixes prompt with /memory on', () => {
+  const result = runSpawnWithConfig({ 'copilot-cli-settings': { memory: 'on' } }, 'Do the task.');
+  assert.ok(result, 'spawn must be called');
+  assert.ok(result.startsWith('/memory on\n\n'), 'prompt prefixed with /memory on');
+  assert.ok(result.includes('Do the task.'), 'original prompt preserved');
+});
+
+test('spawnCopilot: copilot-cli-settings memory:"off" does not prefix prompt', () => {
+  const result = runSpawnWithConfig({ 'copilot-cli-settings': { memory: 'off' } }, 'Do the task.');
+  assert.strictEqual(result, 'Do the task.', 'prompt unchanged when memory=off');
+});
+
+test('spawnCopilot: copilot-cli-settings memory:"none" does not prefix prompt', () => {
+  const result = runSpawnWithConfig({ 'copilot-cli-settings': { memory: 'none' } }, 'Do the task.');
+  assert.strictEqual(result, 'Do the task.', 'prompt unchanged when memory=none');
+});
+
+test('spawnCopilot: absent copilot-cli-settings does not prefix prompt', () => {
+  const result = runSpawnWithConfig({}, 'Do the task.');
+  assert.strictEqual(result, 'Do the task.', 'prompt unchanged when copilot-cli-settings absent');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────────
 
 if (_failed > 0) {

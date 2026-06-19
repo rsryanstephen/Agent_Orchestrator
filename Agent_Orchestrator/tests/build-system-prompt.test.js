@@ -222,6 +222,49 @@ test('global-config.json declares default empty system-prompt-additions block fo
   assert.ok('assessment' in gc['system-prompt-additions'], 'must include assessment entry');
 });
 
+// ── use-karpathy clause and neutralisation ────────────────────────────────────
+
+test('resolveKarpathyClause function defined and reads useKarpathy from topicConfig then config', () => {
+  assert.match(src, /function resolveKarpathyClause\s*\(\s*\)/,
+    'resolveKarpathyClause() must be defined in run-agent.js');
+  assert.match(src, /topicConfig\.useKarpathy\s*!=\s*null.*topicConfig\.useKarpathy.*config\.useKarpathy/s,
+    'resolveKarpathyClause must check topicConfig.useKarpathy first, then config.useKarpathy');
+});
+
+test('karpathyClause assigned from resolveKarpathyClause()', () => {
+  assert.match(src, /const karpathyClause\s*=\s*resolveKarpathyClause\(\)/,
+    'karpathyClause must be set by calling resolveKarpathyClause()');
+});
+
+test('karpathyNeutralisationClause defined and references external CLAUDE.md', () => {
+  assert.match(src, /const karpathyNeutralisationClause\s*=/,
+    'karpathyNeutralisationClause must be defined');
+  assert.ok(
+    src.includes('external CLAUDE.md') && src.includes('Karpathy'),
+    'karpathyNeutralisationClause must reference Karpathy and external CLAUDE.md'
+  );
+});
+
+test('buildSystemPrompt injects karpathyClause or karpathyNeutralisationClause after cavemanClause', () => {
+  const fnMatch = src.match(/function buildSystemPrompt[\s\S]*?\n\}/);
+  assert.ok(fnMatch, 'buildSystemPrompt function body must be extractable');
+  const body = fnMatch[0];
+  assert.ok(
+    body.includes('karpathyClause || karpathyNeutralisationClause') ||
+    body.includes('karpathyClause || karpathyNeutralisation'),
+    'buildSystemPrompt must inject karpathyClause || karpathyNeutralisationClause'
+  );
+  const idxCaveman = body.indexOf('cavemanClause');
+  const idxKarpathy = body.indexOf('karpathyClause');
+  assert.ok(idxKarpathy > idxCaveman, 'karpathyClause must be injected AFTER cavemanClause');
+});
+
+test('global-config.json declares use-karpathy key', () => {
+  const gcRaw = fs.readFileSync(path.join(HARNESS, 'global-config.json'), 'utf8');
+  const gc = JSON.parse(gcRaw);
+  assert.ok('use-karpathy' in gc, 'global-config.json must declare a "use-karpathy" key');
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

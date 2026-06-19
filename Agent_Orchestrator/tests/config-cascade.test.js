@@ -79,25 +79,10 @@ test('(5) cfgRead: camelCase alias in global-config surfaces via kebab-key looku
   assert.strictEqual(v, 7, 'max-context-lifespan must resolve via cfgRead');
 });
 
-// ── (6) editor-save-all-command legacy fallback wiring in run-agent.js ────────
-test('(6) run-agent.js reads editor-save-all-command via cfgRead with vscode-save-all-command fallback', () => {
-  assert.ok(/cfgRead\(topicConfig,\s*config,\s*'editor-save-all-command'/.test(runAgentSrc),
-    'run-agent.js must call cfgRead for editor-save-all-command');
-  assert.ok(/cfgRead\(topicConfig,\s*config,\s*'vscode-save-all-command'/.test(runAgentSrc),
-    'run-agent.js must fall back to cfgRead for vscode-save-all-command');
-  // Verify the legacy fallback is consulted only when the new key is absent.
-  assert.ok(/newVal.*legacyVal|legacyVal.*newVal/s.test(runAgentSrc) ||
-    /editor-save-all-command.*vscode-save-all-command/s.test(runAgentSrc),
-    'run-agent.js must use new key then fall back to legacy vscode-save-all-command');
-});
-
-// ── (7) editor-save-flush-ms legacy fallback wiring ─────────────────────────
-test('(7) run-agent.js reads editor-save-flush-ms with vscode-save-flush-ms fallback', () => {
-  assert.ok(/cfgRead\(topicConfig,\s*config,\s*'editor-save-flush-ms'/.test(runAgentSrc),
-    'run-agent.js must call cfgRead for editor-save-flush-ms');
-  assert.ok(/cfgRead\(topicConfig,\s*config,\s*'vscode-save-flush-ms'/.test(runAgentSrc),
-    'run-agent.js must fall back to cfgRead for vscode-save-flush-ms');
-});
+// (6)/(7) REMOVED: the editor save-all flush is now hardcoded and
+// non-configurable — run-agent.js no longer reads `editor-save-all-command` /
+// `editor-save-flush-ms` (or the legacy `vscode-save-*` aliases) via cfgRead.
+// See editor-flush-hardcoded-no-config.test.js for the hardcoded contract.
 
 // ── (8) network-retry: per-topic cascade ──────────────────────────────────────
 test('(8) cfgRead: per-topic network-retry.maxAttempts overrides global', () => {

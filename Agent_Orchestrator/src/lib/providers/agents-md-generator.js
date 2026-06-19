@@ -144,4 +144,98 @@ function teardown(rootDir, contextFileName = 'AGENTS.md') {
   } catch {}
 }
 
-module.exports = { setup, teardown, buildAgentsMdContent };
+// Back up and blank a single file; return a teardown fn.
+// Does NOT push to _teardownCallbacks — the outer caller manages registration.
+function _suppressSingleFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return () => {};
+  const bakPath = filePath + BAK_SUFFIX;
+  try {
+    fs.copyFileSync(filePath, bakPath);
+    fs.writeFileSync(filePath, '', 'utf8');
+  } catch (e) {
+    throw new Error(`agents-md-generator: could not suppress ${filePath}: ${e.message}`);
+  }
+  return () => {
+    try {
+      if (fs.existsSync(bakPath)) {
+        fs.copyFileSync(bakPath, filePath);
+        try { fs.unlinkSync(bakPath); } catch {}
+      }
+    } catch {}
+  };
+}
+
+// Resolve VS Code global User config directory (cross-platform).
+function _resolveVSCodeGlobalUserDir() {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'Code', 'User');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User');
+  }
+  return path.join(os.homedir(), '.config', 'Code', 'User');
+}
+
+/**
+ * Backs up and blanks two Copilot double-injection sources before a harness spawn:
+ *   1. ~/.copilot/copilot-instructions.md  (standalone Copilot CLI global instructions)
+ *   2. <VSCode-User>/AGENTS.md             (VS Code Copilot agent-mode global context)
+ * Both files are restored on teardown.
+ *
+ * opts.filePath       — override path (1) (used in tests)
+ * opts.vscodeFilePath — override path (2); pass null to skip VS Code suppression (used in tests)
+ * Returns combined teardown function (also registered on process exit / SIGINT / uncaughtException).
+ */
+function suppressCopilotInstructions(opts) {
+  const filePath = (opts && opts.filePath)
+    ? opts.filePath
+    : path.join(os.homedir(), '.copilot', 'copilot-instructions.md');
+
+  // VS Code global AGENTS.md is a second double-injection vector for Copilot agent mode.
+  // opts.vscodeFilePath: override for tests; pass null to skip; undefined = auto-resolve.
+  const vscodeAgentsMdPath = (opts && 'vscodeFilePath' in opts)
+    ? opts.vscodeFilePath
+    : path.join(_resolveVSCodeGlobalUserDir(), 'AGENTS.md');
+
+  _ensureSignalHandlers();
+
+  const t1 = _suppressSingleFile(filePath);
+  const t2 = vscodeAgentsMdPath ? _suppressSingleFile(vscodeAgentsMdPath) : () => {};
+
+  const combined = () => { t1(); t2(); };
+  _teardownCallbacks.push(combined);
+  return combined;
+}
+
+// Backs up and blanks ~/.gemini/GEMINI.md before a Gemini harness spawn so the
+// global Gemini CLI instructions do not double-inject on top of the harness-generated GEMINI.md.
+// File is restored on teardown. opts.filePath overrides the target path (used in tests).
+function suppressGeminiInstructions(opts) {
+  const filePath = (opts && opts.filePath)
+    ? opts.filePath
+    : path.join(os.homedir(), '.gemini', 'GEMINI.md');
+
+  _ensureSignalHandlers();
+
+  const t1 = _suppressSingleFile(filePath);
+  _teardownCallbacks.push(t1);
+  return t1;
+}
+
+// Backs up and blanks ~/.claude/CLAUDE.md before a harness spawn so the global
+// Claude instructions do not double-inject on top of harness-injected skills content.
+// File is restored on teardown. opts.filePath overrides the target path (used in tests).
+function suppressClaudeInstructions(opts) {
+  const filePath = (opts && opts.filePath)
+    ? opts.filePath
+    : path.join(os.homedir(), '.claude', 'CLAUDE.md');
+
+  _ensureSignalHandlers();
+
+  const t1 = _suppressSingleFile(filePath);
+  _teardownCallbacks.push(t1);
+  return t1;
+}
+
+module.exports = { setup, teardown, buildAgentsMdContent, suppressCopilotInstructions, suppressGeminiInstructions, suppressClaudeInstructions };

@@ -10,85 +10,28 @@
 | `claude-sonnet-4-6` | Sonnet | `sonnet` | Yes |
 | `claude-haiku-4-5-20251001` | Haiku | `haiku` | No |
 
-Model values accept: a full `claude-*` ID, a family alias (`opus`, `sonnet`, `haiku`), `"auto"` (heuristic — see below), or `""` / omitted (defaults to `claude-sonnet-4-6`). Unrecognised names fall back to `claude-sonnet-4-6` with a note in the usage footer. New topics default all three roles to `"auto"`.
-
 ## Valid Effort Levels
 
 | Effort | Budget Tokens | Supported By |
 | ------ | ------------- | ------------ |
-| `""` / `"none"` | — | All models |
+| `""  / "none"` | — | All models |
 | `"auto"` | heuristic (see below) | Opus, Sonnet |
 | `"low"` | 1,024 | Opus, Sonnet |
 | `"medium"` | 5,000 | Opus, Sonnet |
 | `"high"` | 12,000 | Opus, Sonnet |
 | `"max"` | 32,000 | Opus, Sonnet |
 
-### `auto` effort heuristic
-
-When effort is set to `"auto"`, `run-agent.js` classifies the prompt using a **weighted multi-factor score** (no extra LLM call). Each factor contributes points; the total determines the level:
-
-| Score | Resolved level |
-| ----- | -------------- |
-| ≤ 1 | `low` |
-| 2–3 | `medium` |
-| 4–6 | `high` |
-| ≥ 7 | `max` |
-
-**Scoring factors:**
-
-| Factor | Points |
-| ------ | ------ |
-| Prompt length ≥ 1 500 chars | +3 |
-| Prompt length 500–1 499 chars | +2 |
-| Prompt length 150–499 chars | +1 |
-| ≥ 5 numbered/bulleted requirements | +3 |
-| 3–4 numbered/bulleted requirements | +2 |
-| 1–2 numbered/bulleted requirements | +1 |
-| Architecture keywords (`architecture`, `overhaul`, `full rewrite`, `redesign`, `comprehensive`, `migrate all`, `refactor all`, `from scratch`) | +3 |
-| Complexity keywords (`refactor`, `parallel`, `pipeline`, `implement`, `integrate`, `restructure`, `modular`, `extract`, `abstraction`) | +2 |
-| ≥ 5 distinct action verbs (`add`, `update`, `create`, `remove`, `fix`, etc.) | +2 |
-| 3–4 distinct action verbs | +1 |
-| Simple-task keywords (`rename`, `typo`, `fix typo`, `minor`, `quick`, `small`, `update readme`, `remove comment`) | −2 |
-
-**Why weighted scoring over first-match rules:**
-The previous heuristic was first-match (any architecture keyword → max, regardless of context). A weighted approach accumulates independent signals — a short prompt containing `refactor` but flagged as `minor` now correctly lands at `low` instead of `high`.
-
-### Planning agent effort and model override
-
-When the planning agent runs (`runp`, `runpc`, `runall`), it automatically classifies the planning response text and **sets the `coding` and `assessment` effort and model** in `topic-config.json` for the current topic. This overrides whatever was configured manually. The logic uses the same `auto` scoring above, applied to the plan text rather than the raw user prompt — giving a more accurate signal because the plan explicitly describes scope and file count.
-
-New topics created with `start-topic.js` default to `"auto"` for all three roles and all three effort levels.
-
-## `auto` model heuristic
-
-When model is set to `"auto"`, `run-agent.js` classifies the prompt using the same **weighted multi-factor score** as the effort heuristic, then maps the score to a model tier:
-
-| Score | Resolved model |
-| ----- | -------------- |
-| ≤ 1 | `claude-haiku-4-5-20251001` (fast, low-cost) |
-| 2–5 | `claude-sonnet-4-6` (balanced) |
-| ≥ 6 | `claude-opus-4-8` (highest capability) |
-
-The resolved model is shown in the usage footer as `auto → sonnet` (etc.). Planning agent overrides use the same scoring on the plan text and write the resolved model ID directly to `topic-config.json` for `coding` and `assessment` roles.
-
 ## Usage in `topic-config.json` / `global-config.json`
 
 ```json
 "models": {
-  "planning": "auto",
-  "coding": "auto",
-  "assessment": "auto"
-},
-"model-effort": {
-  "planning": "auto",
-  "coding": "auto",
-  "assessment": "auto"
+  "planning": "opus",
+  "coding": "sonnet",
+  "assessment": "",
+  "effort": "medium"
 }
 ```
 
-- `models` accepts: `"auto"`, a family alias (`opus`, `sonnet`, `haiku`), a full `claude-*` ID, or `""` (→ `claude-sonnet-4-6`).
-- `model-effort` is a separate section from `models`, with a value per role (`planning`, `coding`, `assessment`).
-- Empty string or `"none"` disables extended thinking for that role.
-- `"auto"` for either key uses the weighted prompt heuristic — no extra LLM call, no added latency.
-- When the planning agent runs, it overrides the `coding` and `assessment` model and effort via the same heuristic applied to the plan text.
+- `effort` applies to all roles unless a per-role override is set (e.g. `"coding_effort": "high"`).
+- Empty string or `"none"` disables extended thinking (default).
 - Applying an effort level to Haiku (which does not support extended thinking) will cause a CLI error.

@@ -258,7 +258,7 @@ test('(PI14-runtime) resolveModel falls back to provider-native medium tier (not
 
   // Extract _loadProviderTiers (depends on fs, path, HARNESS, require, _PROVIDER_AUTO_MODELS_STATIC).
   const lptStart = RUN_AGENT_SRC.indexOf('\nfunction _loadProviderTiers(');
-  const lptEnd = RUN_AGENT_SRC.indexOf('\nlet CONTEXT_TRUNCATION =', lptStart);
+  const lptEnd = RUN_AGENT_SRC.indexOf('\nconst touchedDirs = new Set();', lptStart);
   const lptSrc = RUN_AGENT_SRC.slice(lptStart, lptEnd).trim();
 
   const rmiStart = RUN_AGENT_SRC.indexOf('function resolveModelId(');

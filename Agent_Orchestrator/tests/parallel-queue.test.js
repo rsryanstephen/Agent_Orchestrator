@@ -386,8 +386,13 @@ async function main() {
     assert.strictEqual(result.hold.length, 1);
     assert.strictEqual(result.hold[0].body, 'TWO');
     const md = fs.readFileSync(histPath, 'utf8');
-    assert.match(md, /## Parallel Batch TS/);
-    // Ordering: queueIndex 0 ("one") appears before queueIndex 2 ("three").
+    // New splice format: each non-hold block lands as `## User Prompt (From the Queue)`
+    // followed by its agent output (replaced the old `## Parallel Batch <ts>` wrapper).
+    assert.match(md, /## User Prompt \(From the Queue\)/);
+    // Regression guard: a (hold) at queueIndex 1 must NOT drop the non-hold block
+    // at queueIndex 2 — both non-hold outputs must be present and FIFO-ordered.
+    assert.ok(md.includes('done:one'), 'first non-hold output spliced');
+    assert.ok(md.includes('done:three'), 'non-hold output after the (hold) gap not dropped');
     assert.ok(md.indexOf('done:one') < md.indexOf('done:three'));
     fs.rmSync(td, { recursive: true, force: true });
   });

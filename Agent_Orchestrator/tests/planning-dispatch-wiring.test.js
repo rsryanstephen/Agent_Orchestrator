@@ -35,7 +35,6 @@ function test(name, fn) {
 // ── Helpers mirrored from run-agent.js / normalize-history.js ────────────────
 
 const ANY_RESPONSE_HEADER = '(?:Planning|Coding|Assessment)\\s+Agent(?:\\s+\\d+)?\\s+Response(?:\\s*\\(Remediation(?:\\s+task-\\d+)?\\))?(?:\\s*\\(task-\\d+\\))?';
-const CONTEXT_TRUNCATION = 400;
 
 function parseConversationContext(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
@@ -63,7 +62,6 @@ function parseConversationContext(filePath) {
     let text = block.text;
     if (/agent response/i.test(block.header)) {
       text = text.replace(/\n\n\*Model:[\s\S]*?\*\s*$/, '');
-      if (text.length > CONTEXT_TRUNCATION) text = text.slice(0, CONTEXT_TRUNCATION) + '\n...[truncated to save tokens]';
     }
     return `${block.header}\n\n${text}`;
   }).join('\n\n');
@@ -117,7 +115,7 @@ test('(c) source: runPlanning passes historyRel to buildContextSection (fix-ii)'
   const nextFn = runAgentSrc.indexOf('\nasync function ', planStart + 1);
   const fnBody = nextFn > 0 ? runAgentSrc.slice(planStart, nextFn) : runAgentSrc.slice(planStart);
   assert.ok(
-    fnBody.includes('buildContextSection(topicConfig.contextFiles, historyRel)'),
+    fnBody.includes('buildContextSection(topicConfig.contextFiles, historyRel'),
     'runPlanning must pass historyRel to buildContextSection to prevent agent reading history file directly'
   );
   assert.ok(
@@ -159,7 +157,7 @@ test('(e) source: runPlanning emits SHA-256 file-state debug log before runClaud
 
 test('(f) source: buildContextSection structurally filters activeHistoryRel and emits do-not-read note', () => {
   assert.ok(
-    /function buildContextSection\(contextEntries,\s*activeHistoryRel\s*=\s*null\)/.test(runAgentSrc),
+    /function buildContextSection\(contextEntries,\s*activeHistoryRel\s*=\s*null\s*,/.test(runAgentSrc),
     'buildContextSection must declare activeHistoryRel parameter with null default'
   );
   // Structural exclusion: the function must filter the history path from context paths,

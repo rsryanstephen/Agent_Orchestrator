@@ -22,7 +22,7 @@ hresume()        { \node Agent_Orchestrator/src/auto-resume.js "$@"; }
 
 # Memory (single-file-per-topic — no role argument)
 hclear()         { \node Agent_Orchestrator/src/clear-memory.js "$@"; }    # hclear [topic|id|all]
-hcompress()      { \node Agent_Orchestrator/src/compress-memory.js "$@"; } # hcompress [topic|id|all]
+hscrubmem()      { \node Agent_Orchestrator/src/scrub-compressed-memory.js "$@"; } # hscrubmem [topic|id|all] — strip stale ## Compressed Memory sections
 
 # Prompt-queue maintenance
 # hqregen [topic|id|all] — destructively wipe and re-seed prompt-queue.md for a topic

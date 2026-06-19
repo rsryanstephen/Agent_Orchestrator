@@ -76,6 +76,21 @@ test('(3) bare shorthand header (no `Pipeline:` prefix) is recognised', () => {
   assert.strictEqual(blocks[0].body.trim(), 'Do the thing.');
 });
 
+// ── (3b) parsePromptFileHeader: per-prompt header (pipeline + model) ───────────
+test('(3b) parsePromptFileHeader extracts pipeline + model and strips header line', () => {
+  const r = promptQueue.parsePromptFileHeader('opus caf\n\nDo X');
+  assert.strictEqual(r.pipeline, 'caf', 'pipeline shorthand should resolve');
+  assert.strictEqual(r.provider, 'claude-code', 'opus -> claude-code provider');
+  assert.ok(r.model, 'opus family should resolve to a non-null model id');
+  assert.strictEqual(r.body.trim(), 'Do X', 'header line stripped from body');
+});
+test('(3b) parsePromptFileHeader returns null-ish header for prose first line', () => {
+  const r = promptQueue.parsePromptFileHeader('Fix the login bug.\nMore detail.');
+  assert.strictEqual(r.pipeline, null, 'prose first line -> no pipeline');
+  assert.strictEqual(r.model, null, 'prose first line -> no model');
+  assert.ok(r.body.startsWith('Fix the login bug.'), 'body unchanged when no header');
+});
+
 // ── (4) unknown shorthand -> warn + leave queue untouched ─────────────────────
 test('(4) unknown shorthand in head -> warning + queue file NOT consumed', () => {
   const d = tmpdir();

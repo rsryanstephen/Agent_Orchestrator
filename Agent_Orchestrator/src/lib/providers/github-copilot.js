@@ -4,7 +4,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { classifyTransientError } = require('../token-error');
+const { classifyTransientError, classifyModelAvailabilityError } = require('../token-error');
+
+// Harness root — three levels up from src/lib/providers/. Shared constant so
+// global-config.json path derivation does not drift if files move.
+const HARNESS = path.join(__dirname, '..', '..', '..');
 
 // Copilot/OpenAI-style finish reasons that indicate non-natural stop.
 const COPILOT_TRUNCATED_REASONS = new Set(['length', 'max_tokens', 'content_filter', 'safety']);
@@ -202,12 +206,23 @@ function resolvecopilotBin() {
  * A heartbeat line "still working... (Ns)" is written to stdout every 5 s.
  */
 function spawnCopilot(opts) {
-  const { prompt, model, mcpConfig, cwd, silent, _spawn: spawnFn = spawn } = opts || {};
+  // _configPath: test-only injection to override global-config.json path.
+  const { prompt, model, mcpConfig, cwd, silent, _spawn: spawnFn = spawn, _configPath } = opts || {};
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-harness-'));
+
+  // Prefix prompt with Copilot CLI slash commands from the copilot-cli-settings block in global-config.json.
+  let effectivePrompt = String(prompt);
+  try {
+    const _gcfgPath = _configPath || path.join(HARNESS, 'global-config.json');
+    const _cliSettings = (JSON.parse(fs.readFileSync(_gcfgPath, 'utf8'))['copilot-cli-settings']) || {};
+    if (_cliSettings['memory'] && _cliSettings['memory'] !== 'off' && _cliSettings['memory'] !== 'none') {
+      effectivePrompt = `/memory ${_cliSettings['memory']}\n\n${effectivePrompt}`;
+    }
+  } catch { /* config absent — skip prefix */ }
 
   for (const fn of _preHooks) { try { fn(); } catch {} }
 
-  const args = ['-p', String(prompt), '--allow-all-tools', '--log-dir', logDir];
+  const args = ['-p', effectivePrompt, '--allow-all-tools', '--log-dir', logDir];
   if (model && model.trim()) args.push('--model', model.trim());
   if (mcpConfig && fs.existsSync(mcpConfig)) args.push('--mcp-config', mcpConfig);
 
@@ -366,14 +381,22 @@ function parseStream(exitCode, logDir, stderrBuf, opts) {
     const stderr = (stderrBuf || '').trim();
     const isQuota = /quota|rate.?limit|premium.?request/i.test(stderr);
     const isAuth = /401|unauthorized|auth/i.test(stderr);
-    const isTransient = !isQuota && classifyTransientError(stderr).kind === 'transient';
-    if (isQuota) {
+    // Model-unavailable must win over noisy 429/5xx substrings — check before transient.
+    const modelAvail = classifyModelAvailabilityError(stderr);
+    if (modelAvail.kind === 'model-unavailable') {
+      events.push({
+        type: 'error',
+        ts: now,
+        content: { code: 'error_model_unavailable', message: stderr || 'Selected model is unavailable', attemptedModel: modelAvail.model, recoverable: false },
+      });
+    } else if (isQuota) {
       events.push({
         type: 'error',
         ts: now,
         content: { code: 'error_quota', message: stderr || 'Premium request quota exhausted', recoverable: false },
       });
     } else {
+      const isTransient = classifyTransientError(stderr).kind === 'transient';
       events.push({
         type: 'error',
         ts: now,
@@ -416,22 +439,32 @@ function parseStream(exitCode, logDir, stderrBuf, opts) {
 
 // ── Skills inline injection (gap #2 workaround) ───────────────────────────────
 
-const INLINE_SKILLS = ['caveman', 'interrogate', 'strict-assessment'];
+// Full set of skills that can be injected inline. registry.js filters this list
+// down to the subset enabled by global-config.json flags before calling.
+const INLINE_SKILLS = ['caveman', 'interrogate', 'strict-assessment', 'karpathy-guidelines'];
 
 /**
  * When capabilities.skillsRuntime=false, prepend verbatim SKILL.md content for
  * each skill so the model receives the same behaviour instructions it would get
  * from the Claude Code skills runtime.
  *
+ * enabledSkills: optional array of skill names to inject; defaults to INLINE_SKILLS.
  * skillsDir: absolute path to the harness `skills/` directory.
  *   Defaults to three levels up from this file's location (harness root) / skills.
  * Returns the augmented prompt string.
  */
-function injectSkillsInline(prompt, skillsDir) {
+function injectSkillsInline(prompt, enabledSkills, skillsDir) {
+  // Legacy two-arg shim: injectSkillsInline(prompt, skillsDir) — shift args when
+  // enabledSkills is a string path (old signature). Array/null/undefined falls through.
+  if (typeof enabledSkills === 'string') {
+    skillsDir = enabledSkills;
+    enabledSkills = null;
+  }
   if (capabilities.skillsRuntime) return prompt;
+  const activeSkills = Array.isArray(enabledSkills) ? enabledSkills : INLINE_SKILLS;
   const dir = skillsDir || path.join(__dirname, '..', '..', '..', 'skills');
   const sections = [];
-  for (const skill of INLINE_SKILLS) {
+  for (const skill of activeSkills) {
     const skillPath = path.join(dir, skill, 'SKILL.md');
     try {
       const content = fs.readFileSync(skillPath, 'utf8').trim();

@@ -193,6 +193,34 @@ function cfgRead(topicConfig, globalConfig, kebab, fallback) {
   return fallback;
 }
 
+// Scope-specificity resolver for the concurrency cap. A TOPIC-level value of
+// EITHER `max-parallel-agents-per-topic` (new key) or `max-concurrent-agents`
+// (legacy alias) must win over a GLOBAL value of either key. We deliberately do
+// NOT use a single cfgRead-per-key cascade here: that would let a GLOBAL new-key
+// value shadow a TOPIC legacy-key value. Pure (no module state) so it is unit
+// testable. Returns the resolved positive number, or `fallback` when neither
+// scope sets a usable (> 0) value.
+function resolveMaxConcurrentAgents(topicConfig, globalConfig, fallback) {
+  let v = cfgRead(topicConfig, {}, 'max-parallel-agents-per-topic', null);
+  if (v == null) v = cfgRead(topicConfig, {}, 'max-concurrent-agents', null);
+  if (v == null) v = cfgRead({}, globalConfig, 'max-parallel-agents-per-topic', null);
+  if (v == null) v = cfgRead({}, globalConfig, 'max-concurrent-agents', null);
+  // A numeric value > 0 wins (covers the serial case v===1). Non-numeric
+  // config (e.g. the string "4") deliberately falls through to `fallback`:
+  // we do not coerce strings, preserving prior behaviour.
+  if (typeof v === 'number' && v > 0) return v;
+  return fallback;
+}
+
+// Pure boolean resolver for `parallel-assessment-agents` (topic-over-global,
+// kebab/camel). Default OFF: only literal true / "true" enables parallel
+// assessors; everything else (false, "false", absent, junk) stays serial.
+// Extracted so the described behaviour is unit-testable without the CLI.
+function resolveParallelAssessmentAgents(topicConfig, globalConfig) {
+  const v = cfgRead(topicConfig, globalConfig, 'parallel-assessment-agents', false);
+  return v === true || v === 'true';
+}
+
 // Atomic write: serialize via safeJsonWrite, re-attaching any captured root inline comments.
 function writeConfig(configPath, obj) {
   const clean = JSON.parse(JSON.stringify(obj));
@@ -218,7 +246,27 @@ function resolveTopicFilesDir(globalConfig) {
     || DEFAULT_TOPIC_FILES_DIR;
 }
 
+// Test-isolation seam: when AGENT_ORCH_TOPICS_DIR is set, treat it as the
+// topic-files ROOT (skip projectRoot/config). Absolute -> used verbatim;
+// relative -> resolved against projectRoot. Lets e2e/regression tests plant
+// throwaway topics in a tmp tree instead of the real topic_files/, so the
+// suite stops churning real topic dirs. No env -> original config/default path.
 function topicDirFor(projectRoot, globalConfig, topicName) {
+  // Highest-precedence override: a parallel-queue child agent is spawned with
+  // AGENT_ORCH_TOPIC_DIR_OVERRIDE pointing at its ephemeral `.parallel/<slug>-<i>`
+  // sub-topic dir. Returning it verbatim (ignoring topicName) makes
+  // topicConfigPathFor / historyPathFor / the unknown-topic guard all resolve
+  // into that self-contained dir, so the child runs without a global-config
+  // `topic-ids` entry. Env-only — never a config edit (CONFIG GUARD-safe).
+  const dirOverride = process.env.AGENT_ORCH_TOPIC_DIR_OVERRIDE;
+  if (dirOverride) {
+    return path.isAbsolute(dirOverride) ? dirOverride : path.join(projectRoot, dirOverride);
+  }
+  const envRoot = process.env.AGENT_ORCH_TOPICS_DIR;
+  if (envRoot) {
+    const root = path.isAbsolute(envRoot) ? envRoot : path.join(projectRoot, envRoot);
+    return path.join(root, topicName);
+  }
   return path.join(projectRoot, resolveTopicFilesDir(globalConfig), topicName);
 }
 
@@ -267,6 +315,8 @@ module.exports = {
   loadConfig,
   loadConfigText,
   cfgRead,
+  resolveMaxConcurrentAgents,
+  resolveParallelAssessmentAgents,
   writeConfig,
   globalConfigPath,
   resolveTopicFilesDir,

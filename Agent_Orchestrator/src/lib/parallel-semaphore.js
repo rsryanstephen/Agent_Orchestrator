@@ -13,7 +13,106 @@
  *   try { ... } finally { release(); }
  */
 
+const fs = require('fs');
+const path = require('path');
+
 let _shared = null;
+
+// ── Cross-process counting semaphore ────────────────────────────────────────
+// The in-process semaphore below only caps holders WITHIN one Node process.
+// The `max-parallel-agents` key is described as a cap "across all topics" —
+// but the harness fans topics out into SEPARATE child processes, so a
+// per-process singleton never enforces the global cap. This file-backed
+// semaphore fixes that: every acquirer (any process) contends on the same
+// `slotsDir`. A held slot is a `<pid>.<n>.slot` file; liveness is proven by
+// `process.kill(pid, 0)`, so a crashed owner's slot is reaped on the next
+// count. Mutations to the slots dir are serialised by a PID-reap lock file
+// (same pattern proven in parallel-batch.js `_acquireHistoryLock`).
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function _acquireDirLock(slotsDir) {
+  const lockPath = slotsDir + '.lock';
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      return lockPath;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // Reap a stale lock whose owner PID is gone, then retry.
+      try {
+        const ownerPid = parseInt(fs.readFileSync(lockPath, 'utf8'), 10);
+        try { process.kill(ownerPid, 0); } catch { try { fs.unlinkSync(lockPath); } catch {} continue; }
+      } catch {}
+      // Brief synchronous spin — lock is held for microseconds (a readdir + write).
+      const end = Date.now() + 25;
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+  return null; // timed out — proceed unlocked rather than deadlock
+}
+function _releaseDirLock(lockPath) {
+  if (!lockPath) return;
+  try { fs.unlinkSync(lockPath); } catch {}
+}
+
+// Count slots whose owner process is still alive; unlink (reap) dead ones.
+// Caller must hold the dir lock.
+function _liveSlotCount(slotsDir) {
+  let names;
+  try { names = fs.readdirSync(slotsDir); } catch { return 0; }
+  let n = 0;
+  for (const name of names) {
+    if (!name.endsWith('.slot')) continue;
+    const pid = parseInt(name.split('.')[0], 10);
+    if (!pid) continue;
+    try { process.kill(pid, 0); n++; }
+    catch { try { fs.unlinkSync(path.join(slotsDir, name)); } catch {} }
+  }
+  return n;
+}
+
+// Build a cross-process semaphore rooted at `slotsDir`. `acquire` resolves with
+// an idempotent `release` once a live-slot count below `cap` is observed.
+function createCrossProcessSemaphore(max, slotsDir) {
+  const cap = Math.max(1, Number(max) || 1);
+  try { fs.mkdirSync(slotsDir, { recursive: true }); } catch {}
+  let _ctr = 0;
+
+  async function acquire(tag) {
+    let warned = false;
+    while (true) {
+      const lock = _acquireDirLock(slotsDir);
+      try {
+        if (_liveSlotCount(slotsDir) < cap) {
+          const slotPath = path.join(slotsDir, `${process.pid}.${_ctr++}.slot`);
+          try { fs.writeFileSync(slotPath, String(tag || ''), 'utf8'); } catch {}
+          let released = false;
+          return function release() {
+            if (released) return;
+            released = true;
+            try { fs.unlinkSync(slotPath); } catch {}
+          };
+        }
+      } finally { _releaseDirLock(lock); }
+      if (!warned && typeof process !== 'undefined' && process.stderr && tag) {
+        warned = true;
+        process.stderr.write(`queue for "${tag}" capped at ${cap} parallel (cross-process) — waiting\n`);
+      }
+      await _sleep(50);
+    }
+  }
+
+  return {
+    acquire,
+    capacity: cap,
+    get inUse() { const l = _acquireDirLock(slotsDir); try { return _liveSlotCount(slotsDir); } finally { _releaseDirLock(l); } },
+    // Cross-process waiters are not centrally tracked; expose 0 so runBatch's
+    // optional onSlotBlocked notice stays numeric rather than NaN.
+    get waiting() { return 0; },
+  };
+}
 
 function createSemaphore(max) {
   const cap = Math.max(1, Number(max) || 1);
@@ -96,4 +195,4 @@ function getSemaphore(max, opts) {
 
 function _resetForTests() { _shared = null; _resizeWarned = false; }
 
-module.exports = { createSemaphore, getSemaphore, _resetForTests };
+module.exports = { createSemaphore, getSemaphore, createCrossProcessSemaphore, _resetForTests };

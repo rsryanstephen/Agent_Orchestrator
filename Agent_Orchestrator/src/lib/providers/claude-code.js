@@ -16,9 +16,111 @@ const LATEST_SONNET = 'claude-sonnet-4-6';
 
 const TOKEN_RESET_REGEX = /resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
 const NETWORK_ERROR_REGEX = /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|getaddrinfo|fetch failed|network (?:error|unavailable|is unreachable)|socket hang up|TLS (?:handshake|connection)|connect ECONN|Unable to (?:reach|connect)|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i;
-const { classifyTokenError, classifyTransientError, classifyModelAvailabilityError } = require('../token-error');
+const { classifyTokenError, classifyTransientError, classifyModelAvailabilityError, classifyContextLimitError } = require('../token-error');
 
 const MAX_CONTINUATIONS = 3;
+
+// On Windows, process.env.PATH uses Git Bash Unix-style paths (/c/Users/...)
+// that Node.js spawn cannot resolve. Use bash `which` to locate the binary,
+// then convert the Unix path to a Windows absolute path for direct spawn.
+// Native .exe can be spawned without a shell; .cmd/.bat need shell: true.
+function gitBashToWindowsPath(p) {
+  return p.replace(/^\/([a-zA-Z])\//, (_, d) => `${d.toUpperCase()}:\\`).replace(/\//g, '\\');
+}
+
+// Find the newest claude.exe inside the VS Code extensions directory. The
+// extension installs to ~/.vscode/extensions/anthropic.claude-code-<ver>/
+// resources/native-binary/claude.exe. Versions sort lexically; we pick the
+// highest so a freshly-updated extension wins.
+function findClaudeInVscodeExtensions() {
+  const homes = [process.env.USERPROFILE, os.homedir()].filter(Boolean);
+  const extRoots = [];
+  for (const h of homes) {
+    extRoots.push(path.join(h, '.vscode', 'extensions'));
+    extRoots.push(path.join(h, '.vscode-insiders', 'extensions'));
+    extRoots.push(path.join(h, '.cursor', 'extensions'));
+  }
+  for (const root of extRoots) {
+    let entries;
+    try { entries = fs.readdirSync(root); } catch { continue; }
+    const candidates = entries
+      .filter(name => name.startsWith('anthropic.claude-code-'))
+      .sort()
+      .reverse();
+    for (const name of candidates) {
+      const exe = path.join(root, name, 'resources', 'native-binary', 'claude.exe');
+      if (fs.existsSync(exe)) return exe;
+    }
+  }
+  return null;
+}
+
+let _resolvedClaudeExec = null;
+function resolveClaudeExec() {
+  if (process.platform !== 'win32') return { cmd: 'claude', shell: false };
+  if (_resolvedClaudeExec) return _resolvedClaudeExec;
+
+  // Allow an explicit override to short-circuit all discovery.
+  const override = process.env.CLAUDE_BIN || process.env.CLAUDE_EXEC_PATH;
+  if (override && fs.existsSync(override)) {
+    _resolvedClaudeExec = { cmd: override, shell: /\.(cmd|bat)$/i.test(override) };
+    return _resolvedClaudeExec;
+  }
+
+  // Primary: locate the VS Code extension's native binary directly on disk.
+  // Robust against Git Bash's Unix-style PATH, which neither cmd.exe `where`
+  // nor a non-login bash `which` can resolve when node is spawned from the
+  // interactive Git Bash terminal.
+  const vscodeBin = findClaudeInVscodeExtensions();
+  if (vscodeBin) {
+    _resolvedClaudeExec = { cmd: vscodeBin, shell: false };
+    return _resolvedClaudeExec;
+  }
+
+  const { execFileSync } = require('child_process');
+
+  // Fallback 1: cmd.exe `where claude` (works when claude is on the real
+  // Windows PATH, e.g. an npm-global install rather than the VS Code ext).
+  const comSpec = process.env.ComSpec;
+  if (comSpec && fs.existsSync(comSpec)) {
+    try {
+      const out = execFileSync(comSpec, ['/c', 'where', 'claude'], { encoding: 'utf8' }).trim();
+      const first = out.split(/\r?\n/)[0].trim();
+      if (first && fs.existsSync(first)) {
+        _resolvedClaudeExec = { cmd: first, shell: /\.(cmd|bat)$/i.test(first) };
+        return _resolvedClaudeExec;
+      }
+    } catch {}
+  }
+
+  // Fallback 2: Git Bash `which claude`, converting the Unix path to Windows.
+  const BASH_LOCATIONS = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ];
+  for (const bash of BASH_LOCATIONS) {
+    if (!fs.existsSync(bash)) continue;
+    try {
+      const unixPath = execFileSync(bash, ['-lc', 'which claude 2>/dev/null'], { encoding: 'utf8' }).trim();
+      if (unixPath) {
+        const winPath = gitBashToWindowsPath(unixPath);
+        for (const c of [winPath, winPath + '.exe']) {
+          if (fs.existsSync(c)) {
+            _resolvedClaudeExec = { cmd: c, shell: /\.(cmd|bat)$/i.test(c) };
+            return _resolvedClaudeExec;
+          }
+        }
+      }
+    } catch {}
+    break;
+  }
+
+  // Last resort: bare name with shell — may still fail, but surfaces a clear
+  // ENOENT-style error rather than silently doing nothing.
+  _resolvedClaudeExec = { cmd: 'claude', shell: true };
+  return _resolvedClaudeExec;
+}
 
 function detectTokenReset(buf) {
   const m = (buf || '').match(TOKEN_RESET_REGEX);
@@ -54,7 +156,8 @@ class ClaudeCodeProvider extends Provider {
 
   async probe() {
     const { spawnSync } = require('child_process');
-    const r = spawnSync('claude', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
+    const { cmd: claudeExec, shell: claudeShell } = resolveClaudeExec();
+    const r = spawnSync(claudeExec, ['--version'], { encoding: 'utf8', shell: claudeShell });
     return r.status === 0;
   }
 
@@ -114,6 +217,17 @@ class ClaudeCodeProvider extends Provider {
       stopReasonFallback = false,
     } = opts;
 
+    // Suppress Claude Code's native auto-load of ~/.claude/CLAUDE.md UNLESS the user opts in
+    // via `provide-native-config-to-agents: true`. When opted in, Claude Code loads the file natively and
+    // the harness does not interfere. When opted out (default), the file is suppressed so the
+    // harness has full control over what enters the system prompt.
+    const _claudeSuppressCfg = (() => { try { return JSON.parse(fs.readFileSync(path.join(HARNESS, 'global-config.json'), 'utf8')); } catch { return {}; } })();
+    let _suppressClaude = null;
+    if (_claudeSuppressCfg['provide-native-config-to-agents'] !== true) {
+      const _amdg = require('./agents-md-generator');
+      if (typeof _amdg.suppressClaudeInstructions === 'function') _suppressClaude = _amdg.suppressClaudeInstructions();
+    }
+
     const doStream = !silent && streamOutput;
 
     const attempt = (payloadOverride) => new Promise((resolve, reject) => {
@@ -163,10 +277,12 @@ class ClaudeCodeProvider extends Provider {
       const harnessSessionDir = path.join(HARNESS, '.state', 'sessions', sessionId);
       try { fs.mkdirSync(harnessSessionDir, { recursive: true }); } catch {}
 
-      const child = spawn('claude', args, {
+      const { cmd: claudeExec, shell: claudeShell } = resolveClaudeExec();
+      const child = spawn(claudeExec, args, {
         cwd: ROOT,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ...effortEnv, CLAUDE_SESSION_DIR: harnessSessionDir, ANTHROPIC_PROJECT_DIR: harnessSessionDir },
+        shell: claudeShell,
       });
       child.stdin.write(payloadOverride != null ? payloadOverride : payload, 'utf8');
       child.stdin.end();
@@ -234,6 +350,20 @@ class ClaudeCodeProvider extends Provider {
             reject(err);
             return;
           }
+          // Context-window overflow ("Prompt is too long" / "context length" /
+          // HTTP 400 invalid_request_error tokens) is permanent for this prompt
+          // -> tag err so run-agent.js surfaces the actionable message instead
+          // of the cryptic "exited with code 1". Checked AFTER model-availability
+          // (which is also permanent) but BEFORE rate/transient classification.
+          const ctxLimit = classifyContextLimitError(combined);
+          if (ctxLimit.kind === 'context-limit') {
+            err.contextLimitHit = true;
+            err.attemptedModel = (modelArgs && modelArgs[1]) || null;
+            err.transientError = false;
+            err.networkError = false;
+            reject(err);
+            return;
+          }
           // Reset-time presence wins over the "monthly spend limit" phrase — the same
           // message has been observed for a 5-hour session limit. Only mark monthlyCapHit
           // when there is genuinely no parseable reset time anywhere in stderr/stdout.
@@ -252,6 +382,7 @@ class ClaudeCodeProvider extends Provider {
               }
             }
           }
+          if (combined.trim()) err.cliOutput = combined.trim();
           reject(err);
         } else {
           resolve({ text: textChunks.join(''), model: detectedModel, usage, costUsd, fallbackNote, effortNote, stopReason });
@@ -334,28 +465,17 @@ class ClaudeCodeProvider extends Provider {
       }
     };
 
-    let result = await runWithRetry();
-    let pauseContinuations = 0;
-    let maxTokenContinuations = 0;
+    try {
+      let result = await runWithRetry();
+      let pauseContinuations = 0;
+      let maxTokenContinuations = 0;
 
-    // pause_turn resume: per Anthropic API, must re-send prior assistant turn so
-    // the model continues from its own output. Re-sending bare payload restarts
-    // from scratch -> duplicate output. Wrap prior text as continuation context.
-    while (result && result.stopReason === 'pause_turn' && pauseContinuations < MAX_CONTINUATIONS) {
-      pauseContinuations += 1;
-      process.stdout.write(`[${label}] stop_reason=pause_turn — resuming (${pauseContinuations}/${MAX_CONTINUATIONS})\n`);
-      const priorText = result.text || '';
-      const contPayload = `${payload}\n\n<prior-assistant-output>\n${priorText}\n</prior-assistant-output>\n\nContinue from exactly where you left off; do not repeat content.`;
-      const next = await runWithRetry(contPayload);
-      result.text = priorText + (next.text || '');
-      result.usage = next.usage || result.usage;
-      result.stopReason = next.stopReason;
-    }
-
-    if (stopReasonFallback) {
-      while (result && result.stopReason === 'max_tokens' && maxTokenContinuations < MAX_CONTINUATIONS) {
-        maxTokenContinuations += 1;
-        process.stdout.write(`[${label}] stop_reason=max_tokens — auto-continuing (${maxTokenContinuations}/${MAX_CONTINUATIONS})\n`);
+      // pause_turn resume: per Anthropic API, must re-send prior assistant turn so
+      // the model continues from its own output. Re-sending bare payload restarts
+      // from scratch -> duplicate output. Wrap prior text as continuation context.
+      while (result && result.stopReason === 'pause_turn' && pauseContinuations < MAX_CONTINUATIONS) {
+        pauseContinuations += 1;
+        process.stdout.write(`[${label}] stop_reason=pause_turn — resuming (${pauseContinuations}/${MAX_CONTINUATIONS})\n`);
         const priorText = result.text || '';
         const contPayload = `${payload}\n\n<prior-assistant-output>\n${priorText}\n</prior-assistant-output>\n\nContinue from exactly where you left off; do not repeat content.`;
         const next = await runWithRetry(contPayload);
@@ -363,27 +483,43 @@ class ClaudeCodeProvider extends Provider {
         result.usage = next.usage || result.usage;
         result.stopReason = next.stopReason;
       }
-    }
 
-    // Always banner when loop exits with non-end_turn stop_reason (cap hit or fallback off).
-    if (result && result.stopReason && result.stopReason !== 'end_turn' && result.stopReason !== 'tool_use') {
-      const capHit =
-        (result.stopReason === 'pause_turn' && pauseContinuations >= MAX_CONTINUATIONS) ||
-        (result.stopReason === 'max_tokens' && (stopReasonFallback ? maxTokenContinuations >= MAX_CONTINUATIONS : true));
-      if (capHit) {
-        const banner = stopReasonFallback || result.stopReason === 'pause_turn'
-          ? `\n\n⚠ Continuation cap exhausted (stop_reason=${result.stopReason}, MAX_CONTINUATIONS=${MAX_CONTINUATIONS})\n`
-          : `\n\n⚠ Truncated (stop_reason=max_tokens) — enable enableStopReasonFallback for auto-continuation\n`;
-        result.text = (result.text || '') + banner;
+      if (stopReasonFallback) {
+        while (result && result.stopReason === 'max_tokens' && maxTokenContinuations < MAX_CONTINUATIONS) {
+          maxTokenContinuations += 1;
+          process.stdout.write(`[${label}] stop_reason=max_tokens — auto-continuing (${maxTokenContinuations}/${MAX_CONTINUATIONS})\n`);
+          const priorText = result.text || '';
+          const contPayload = `${payload}\n\n<prior-assistant-output>\n${priorText}\n</prior-assistant-output>\n\nContinue from exactly where you left off; do not repeat content.`;
+          const next = await runWithRetry(contPayload);
+          result.text = priorText + (next.text || '');
+          result.usage = next.usage || result.usage;
+          result.stopReason = next.stopReason;
+        }
       }
-    }
 
-    if (result) {
-      result.continuations = pauseContinuations + maxTokenContinuations;
-      result.pauseContinuations = pauseContinuations;
-      result.maxTokenContinuations = maxTokenContinuations;
+      // Always banner when loop exits with non-end_turn stop_reason (cap hit or fallback off).
+      if (result && result.stopReason && result.stopReason !== 'end_turn' && result.stopReason !== 'tool_use') {
+        const capHit =
+          (result.stopReason === 'pause_turn' && pauseContinuations >= MAX_CONTINUATIONS) ||
+          (result.stopReason === 'max_tokens' && (stopReasonFallback ? maxTokenContinuations >= MAX_CONTINUATIONS : true));
+        if (capHit) {
+          const banner = stopReasonFallback || result.stopReason === 'pause_turn'
+            ? `\n\n⚠ Continuation cap exhausted (stop_reason=${result.stopReason}, MAX_CONTINUATIONS=${MAX_CONTINUATIONS})\n`
+            : `\n\n⚠ Truncated (stop_reason=max_tokens) — enable enableStopReasonFallback for auto-continuation\n`;
+          result.text = (result.text || '') + banner;
+        }
+      }
+
+      if (result) {
+        result.continuations = pauseContinuations + maxTokenContinuations;
+        result.pauseContinuations = pauseContinuations;
+        result.maxTokenContinuations = maxTokenContinuations;
+      }
+      return result;
+    } finally {
+      // Restore ~/.claude/CLAUDE.md if it was suppressed before this spawn.
+      if (_suppressClaude) _suppressClaude();
     }
-    return result;
   }
 }
 

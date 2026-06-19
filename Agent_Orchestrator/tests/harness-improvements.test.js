@@ -5,9 +5,11 @@
 // Run: node Agent_Orchestrator/tests/harness-improvements.test.js
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const configUtils = require('../src/config-utils');
+const agentsMdGenerator = require('../src/lib/providers/agents-md-generator');
 
 const HARNESS = path.join(__dirname, '..');
 const GLOBAL = path.join(HARNESS, 'global-config.json');
@@ -184,9 +186,9 @@ test('Item 8: "Unsaved editor buffers" warning removed from stdout/log path', ()
 
 test('Item 8: silent-failure flag mechanism preserved (stderr-only diagnostic)', () => {
   assert.ok(/_vsCodeSaveFailureLogged/.test(runAgentSrc), 'silent flag removed');
-  // Editor-agnostic rename: diagnostic now says `editor-save-all-command`.
-  assert.ok(/console\.error\(`editor-save-all-command unavailable/.test(runAgentSrc),
-    'stderr diagnostic missing — would mask broken editor CLI');
+  // Hardcoded keystroke flush: diagnostic now reports a generic flush failure.
+  assert.ok(/console\.error\(`editor buffer flush failed/.test(runAgentSrc),
+    'stderr diagnostic missing — would mask a broken editor flush');
 });
 
 // ── Cascade sanity ─────────────────────────────────────────────────────────────
@@ -272,6 +274,208 @@ test('Item 4 (snapshot semantics): originalAutoRoles + originalGlobalAutoRoles c
     'restoreAutoModelFields must iterate snapshot, not fresh config');
   assert.ok(/for \(const role of originalGlobalAutoRoles\[camelKey\]\)/.test(runAgentSrc),
     'restoreGlobalAutoModelFields must iterate snapshot, not fresh config');
+});
+
+// ── suppressCopilotInstructions ───────────────────────────────────────────────
+const BAK_SUFFIX = '.harness-bak';
+
+test('suppressCopilotInstructions (a): backs up file and blanks it', () => {
+  const filePath = path.join(os.tmpdir(), `copilot-suppress-a-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'original copilot content', 'utf8');
+  try {
+    // vscodeFilePath: null isolates this test from the real VS Code AGENTS.md on disk.
+    const teardown = agentsMdGenerator.suppressCopilotInstructions({ filePath, vscodeFilePath: null });
+    assert.ok(fs.existsSync(bakPath), 'backup file not created');
+    assert.strictEqual(fs.readFileSync(bakPath, 'utf8'), 'original copilot content', 'backup content wrong');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '', 'original file not blanked');
+    teardown();
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressCopilotInstructions (b): teardown restores original file and removes backup', () => {
+  const filePath = path.join(os.tmpdir(), `copilot-suppress-b-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'restore me', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressCopilotInstructions({ filePath, vscodeFilePath: null });
+    teardown();
+    assert.ok(fs.existsSync(filePath), 'file missing after teardown');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), 'restore me', 'file content not restored');
+    assert.ok(!fs.existsSync(bakPath), 'backup not removed after teardown');
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressCopilotInstructions (c): absent file is a no-op', () => {
+  const filePath = path.join(os.tmpdir(), `copilot-suppress-absent-${process.pid}.md`);
+  assert.ok(!fs.existsSync(filePath), 'precondition: file must not exist');
+  let teardown;
+  assert.doesNotThrow(() => { teardown = agentsMdGenerator.suppressCopilotInstructions({ filePath, vscodeFilePath: null }); });
+  assert.doesNotThrow(() => { teardown(); });
+  assert.ok(!fs.existsSync(filePath), 'absent-path must not create file');
+});
+
+test('suppressCopilotInstructions (d): also suppresses VS Code global AGENTS.md', () => {
+  const filePath = path.join(os.tmpdir(), `copilot-suppress-d-${process.pid}.md`);
+  const vscodeFilePath = path.join(os.tmpdir(), `vscode-agents-d-${process.pid}.md`);
+  const bakPath1 = filePath + BAK_SUFFIX;
+  const bakPath2 = vscodeFilePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'copilot content', 'utf8');
+  fs.writeFileSync(vscodeFilePath, 'vscode agents content', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressCopilotInstructions({ filePath, vscodeFilePath });
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '', 'copilot file not blanked');
+    assert.strictEqual(fs.readFileSync(vscodeFilePath, 'utf8'), '', 'vscode AGENTS.md not blanked');
+    assert.strictEqual(fs.readFileSync(bakPath1, 'utf8'), 'copilot content', 'copilot backup wrong');
+    assert.strictEqual(fs.readFileSync(bakPath2, 'utf8'), 'vscode agents content', 'vscode backup wrong');
+    teardown();
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), 'copilot content', 'copilot file not restored');
+    assert.strictEqual(fs.readFileSync(vscodeFilePath, 'utf8'), 'vscode agents content', 'vscode AGENTS.md not restored');
+    assert.ok(!fs.existsSync(bakPath1), 'copilot backup not removed');
+    assert.ok(!fs.existsSync(bakPath2), 'vscode backup not removed');
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(vscodeFilePath); } catch {}
+    try { fs.unlinkSync(bakPath1); } catch {}
+    try { fs.unlinkSync(bakPath2); } catch {}
+  }
+});
+
+test('suppressCopilotInstructions: NOT invoked for gemini or gemini-vertex providers', () => {
+  const registrySrc = fs.readFileSync(path.join(HARNESS, 'src', 'lib', 'providers', 'registry.js'), 'utf8');
+  // The teardown assignment must be gated on github-copilot only — no gemini variant in the condition.
+  const suppressLine = (registrySrc.match(/const copilotInstructionsTeardown[^\n]+/) || [])[0];
+  assert.ok(suppressLine, 'copilotInstructionsTeardown assignment missing from registry.js');
+  assert.ok(!/gemini/.test(suppressLine), 'copilotInstructionsTeardown must not fire for gemini providers');
+  assert.ok(/github-copilot/.test(suppressLine), 'copilotInstructionsTeardown must be gated on github-copilot');
+});
+
+test('provide-native-config-to-agents: registry.js and claude-code.js use flag for suppression/injection', () => {
+  const registrySrc = fs.readFileSync(path.join(HARNESS, 'src', 'lib', 'providers', 'registry.js'), 'utf8');
+  const claudeCodeSrc = fs.readFileSync(path.join(HARNESS, 'src', 'lib', 'providers', 'claude-code.js'), 'utf8');
+  assert.ok(/suppressCopilotInstructions/.test(registrySrc), 'suppressCopilotInstructions not called in registry');
+  assert.ok(/provide-native-config-to-agents/.test(registrySrc), 'provide-native-config-to-agents guard missing from registry');
+  assert.ok(/provide-native-config-to-agents/.test(claudeCodeSrc), 'provide-native-config-to-agents guard missing from claude-code');
+  assert.ok(/mod\.id === 'github-copilot'/.test(registrySrc), 'provider guard missing — must only suppress for copilot');
+  // Flipped semantics: suppression occurs when provide-native-config-to-agents !== true (no prepend).
+  assert.ok(/_claudeSuppressCfg\['provide-native-config-to-agents'\]\s*!==\s*true/.test(claudeCodeSrc),
+    'claude-code.js must suppress when provide-native-config-to-agents !== true');
+  assert.ok(!/payload\s*=\s*_claudeMdContent/.test(claudeCodeSrc),
+    'CLAUDE.md prepend behaviour must be removed from claude-code.js');
+  assert.ok(/suppressClaudeInstructions/.test(claudeCodeSrc),
+    'suppressClaudeInstructions not called in claude-code.js');
+});
+
+test('provide-native-config-to-agents: legacy suppress-claude-global-instructions key removed from claude-code.js', () => {
+  const claudeCodeSrc = fs.readFileSync(path.join(HARNESS, 'src', 'lib', 'providers', 'claude-code.js'), 'utf8');
+  // Legacy key dropped per flipped semantics — single guard on provide-native-config-to-agents only.
+  assert.ok(!/suppress-claude-global-instructions/.test(claudeCodeSrc),
+    'legacy suppress-claude-global-instructions key must be removed from claude-code.js');
+});
+
+test('provide-native-config-to-agents: global-config.json defaults to false with comment', () => {
+  assert.strictEqual(globalCfg['provide-native-config-to-agents'], false, 'provide-native-config-to-agents must default to false');
+  assert.ok(globalCfgRaw.includes('"// provide-native-config-to-agents"'), 'inline comment key missing');
+});
+
+// ── suppressGeminiInstructions ────────────────────────────────────────────────
+
+test('suppressGeminiInstructions (a): backs up file and blanks it', () => {
+  const filePath = path.join(os.tmpdir(), `gemini-suppress-a-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'original gemini content', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressGeminiInstructions({ filePath });
+    assert.ok(fs.existsSync(bakPath), 'backup file not created');
+    assert.strictEqual(fs.readFileSync(bakPath, 'utf8'), 'original gemini content', 'backup content wrong');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '', 'original file not blanked');
+    teardown();
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressGeminiInstructions (b): teardown restores original file and removes backup', () => {
+  const filePath = path.join(os.tmpdir(), `gemini-suppress-b-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'restore me gemini', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressGeminiInstructions({ filePath });
+    teardown();
+    assert.ok(fs.existsSync(filePath), 'file missing after teardown');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), 'restore me gemini', 'file content not restored');
+    assert.ok(!fs.existsSync(bakPath), 'backup not removed after teardown');
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressGeminiInstructions (c): absent file is a no-op', () => {
+  const filePath = path.join(os.tmpdir(), `gemini-suppress-absent-${process.pid}.md`);
+  assert.ok(!fs.existsSync(filePath), 'precondition: file must not exist');
+  let teardown;
+  assert.doesNotThrow(() => { teardown = agentsMdGenerator.suppressGeminiInstructions({ filePath }); });
+  assert.doesNotThrow(() => { teardown(); });
+  assert.ok(!fs.existsSync(filePath), 'absent-path must not create file');
+});
+
+test('suppressGeminiInstructions: registry.js always suppresses for gemini providers, injects when provide-native-config-to-agents true', () => {
+  const registrySrc = fs.readFileSync(path.join(HARNESS, 'src', 'lib', 'providers', 'registry.js'), 'utf8');
+  assert.ok(/suppressGeminiInstructions/.test(registrySrc), 'suppressGeminiInstructions not called in registry');
+  assert.ok(/provide-native-config-to-agents/.test(registrySrc), 'provide-native-config-to-agents guard missing from registry');
+  assert.ok(/mod\.id === 'gemini'/.test(registrySrc), 'provider guard missing — must include gemini');
+  assert.ok(/gemini-vertex/.test(registrySrc), 'provider guard missing — must include gemini-vertex');
+});
+
+// ── suppressClaudeInstructions ────────────────────────────────────────────────
+
+test('suppressClaudeInstructions (a): backs up file and blanks it', () => {
+  const filePath = path.join(os.tmpdir(), `claude-suppress-a-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'original claude content', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressClaudeInstructions({ filePath });
+    assert.ok(fs.existsSync(bakPath), 'backup file not created');
+    assert.strictEqual(fs.readFileSync(bakPath, 'utf8'), 'original claude content', 'backup content wrong');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '', 'original file not blanked');
+    teardown();
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressClaudeInstructions (b): teardown restores original file and removes backup', () => {
+  const filePath = path.join(os.tmpdir(), `claude-suppress-b-${process.pid}.md`);
+  const bakPath = filePath + BAK_SUFFIX;
+  fs.writeFileSync(filePath, 'restore me claude', 'utf8');
+  try {
+    const teardown = agentsMdGenerator.suppressClaudeInstructions({ filePath });
+    teardown();
+    assert.ok(fs.existsSync(filePath), 'file missing after teardown');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), 'restore me claude', 'file content not restored');
+    assert.ok(!fs.existsSync(bakPath), 'backup not removed after teardown');
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+  }
+});
+
+test('suppressClaudeInstructions (c): absent file is a no-op', () => {
+  const filePath = path.join(os.tmpdir(), `claude-suppress-absent-${process.pid}.md`);
+  assert.ok(!fs.existsSync(filePath), 'precondition: file must not exist');
+  let teardown;
+  assert.doesNotThrow(() => { teardown = agentsMdGenerator.suppressClaudeInstructions({ filePath }); });
+  assert.doesNotThrow(() => { teardown(); });
+  assert.ok(!fs.existsSync(filePath), 'absent-path must not create file');
 });
 
 if (!process.exitCode) console.log('\nAll regression tests passed.');

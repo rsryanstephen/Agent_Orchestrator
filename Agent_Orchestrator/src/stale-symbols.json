@@ -1,0 +1,40 @@
+{
+  "staleSymbols": [
+    {
+      "symbol": "compressTopic",
+      "description": "removed compression function — no longer exists in run-agent.js"
+    },
+    {
+      "symbol": "summarizeContent",
+      "description": "removed compression helper — no longer exists"
+    },
+    {
+      "symbol": "__compress-history__",
+      "description": "removed internal command token — no longer used"
+    },
+    {
+      "symbol": "max-history-lines",
+      "description": "removed config key — no longer recognised by the harness"
+    },
+    {
+      "symbol": "compress-memory",
+      "description": "removed module (src/compress-memory.js deleted)"
+    },
+    {
+      "symbol": "## Compressed Memory",
+      "description": "removed history section header — scrubbed by scrub-compressed-memory.js"
+    },
+    {
+      "symbol": "compressed-memory injection",
+      "description": "removed feature — harness no longer injects Compressed Memory blocks into agent context"
+    },
+    {
+      "symbol": "Compressed History block",
+      "description": "alias for the removed compressed-memory injection feature"
+    },
+    {
+      "symbol": "context-truncation",
+      "description": "removed config key — superseded by auto-archive (maybeAutoArchiveHistory)"
+    }
+  ]
+}

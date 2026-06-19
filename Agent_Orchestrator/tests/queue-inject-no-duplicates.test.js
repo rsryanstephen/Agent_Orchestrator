@@ -258,11 +258,5 @@ test('(11) injectQueuedPromptIntoHistory emits ONE consolidated debug entry (no 
     'branch label must retain legacy reuse/fresh-append continuity');
 });
 
-test('(9) compress-memory.js does not stack a duplicate placeholder when one already exists', () => {
-  const src = fs.readFileSync(path.join(HARNESS, 'src', 'compress-memory.js'), 'utf8');
-  assert.ok(/trailingPlaceholderPresent/.test(src) || /User Prompt\(\?:\\s\+\\\([\^\)]\+\\\)\)\?/.test(src),
-    'compress-memory.js must guard the `## User Prompt` trailer against existing placeholder');
-});
-
 if (_failed === 0) console.log('\nAll queue-inject-no-duplicates tests passed.');
 else console.error(`\n${_failed} test(s) failed.`);

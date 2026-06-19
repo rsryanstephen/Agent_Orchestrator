@@ -26,7 +26,6 @@ function test(name, fn) {
 }
 
 // Replicate the FIXED parseConversationContext from run-agent.js.
-const CONTEXT_TRUNCATION = 400;
 const ANY_RESPONSE_HEADER = '(?:Planning|Coding|Assessment)\\s+Agent(?:\\s+\\d+)?\\s+Response(?:\\s*\\(Remediation(?:\\s+task-\\d+)?\\))?(?:\\s*\\(task-\\d+\\))?';
 
 function parseConversationContext(filePath) {
@@ -61,9 +60,6 @@ function parseConversationContext(filePath) {
     let text = block.text;
     if (/agent response/i.test(block.header)) {
       text = text.replace(/\n\n\*Model:[\s\S]*?\*\s*$/, '');
-      if (text.length > CONTEXT_TRUNCATION) {
-        text = text.slice(0, CONTEXT_TRUNCATION) + '\n...[truncated to save tokens]';
-      }
     }
     return `${block.header}\n\n${text}`;
   }).join('\n\n');

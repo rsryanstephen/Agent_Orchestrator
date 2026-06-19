@@ -31,8 +31,8 @@ const FN_SRC = SRC.slice(FN_START, FN_END).trim();
 const PARSE_START = SRC.indexOf('function parseConversationContext(');
 assert.ok(PARSE_START >= 0, 'parseConversationContext not found');
 // Find next top-level function after parseConversationContext.
-const PARSE_END = SRC.indexOf('\nfunction stripTrailingUserPrompt(', PARSE_START);
-assert.ok(PARSE_END > PARSE_START, 'stripTrailingUserPrompt boundary not found');
+const PARSE_END = SRC.indexOf('\nfunction buildHistorySelfLookupBlock(', PARSE_START);
+assert.ok(PARSE_END > PARSE_START, 'buildHistorySelfLookupBlock boundary not found');
 const PARSE_SRC = SRC.slice(PARSE_START, PARSE_END).trim();
 
 function makeTmpFile(content) {
@@ -47,21 +47,20 @@ function buildArchiveFn(threshold) {
   const factory = new Function(
     'fs', 'path', 'log', 'config', 'HISTORY_ARCHIVE_CLEAR_MARKER',
     'DEFAULT_HISTORY_ARCHIVE_THRESHOLD',
-    `${FN_SRC}; return maybeAutoArchiveHistory;`
+    `${FN_SRC}\n; return maybeAutoArchiveHistory;`
   );
   return factory(fs, path, () => {}, { 'history-archive-threshold-lines': threshold }, LIVE_MARKER, threshold);
 }
 
-const CONTEXT_TRUNCATION = 12000;
 const ANY_RESPONSE_HEADER = '(?:Coding Agent|Planning Agent|Parallel Coding Agent|Parallel Planning Agent)\\s+Response(?:\\s+\\(.*?\\))?';
 
 function buildParseFn() {
   // eslint-disable-next-line no-new-func
   const factory = new Function(
-    'fs', 'CONTEXT_TRUNCATION', 'ANY_RESPONSE_HEADER',
+    'fs', 'ANY_RESPONSE_HEADER',
     `${PARSE_SRC}; return parseConversationContext;`
   );
-  return factory(fs, CONTEXT_TRUNCATION, ANY_RESPONSE_HEADER);
+  return factory(fs, ANY_RESPONSE_HEADER);
 }
 
 describe('history-archive-marker-not-frontmatter', () => {

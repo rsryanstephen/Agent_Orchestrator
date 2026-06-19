@@ -156,8 +156,13 @@ configUtils.writeConfig(configPath, config);
 releaseConfigLock();
 log(`global-config.json updated — topic "${topicName}" registered as ID ${numericId}`);
 
+// Atomic write of `.last-topic`: a plain writeFileSync interrupted mid-call
+// can leave the file truncated to 0 bytes, after which `hrun` proceeds without
+// a topic. Route through atomicWriteText so the file is always either the
+// previous value or the new value, never empty.
 const lastTopicPath = path.join(HARNESS, '.last-topic');
-fs.writeFileSync(lastTopicPath, topicName, 'utf8');
+const { atomicWriteText } = require('./lib/safe-json-write');
+atomicWriteText(lastTopicPath, topicName);
 log(`.last-topic set to "${topicName}"`);
 log(`Done. Write your task under "## User Prompt" in ${topicFilesDir}/${topicName}/${topicName}.md, then run:`);
 log(`  node Agent_Orchestrator/run-agent.js ${numericId} coding`);

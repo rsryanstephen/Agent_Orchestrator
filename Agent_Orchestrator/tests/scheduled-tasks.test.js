@@ -14,11 +14,12 @@
  *  (ST6) ClaudeHarnessModelsRefresh: --force skips marker check
  *  (ST7) ensureModelsRefreshScheduled called lazily on hrun startup in run-agent.js
  *  (ST8) auto-resume-on-token-limit: false disables entire auto-resume block
- *  (ST9) use-detached-auto-resume: false -> calls handleTokenLimitInline (inline countdown)
- *  (ST10) use-detached-auto-resume: true -> calls scheduleSharedWake (detached OS task)
- *  (ST11) SIGINT during inline wait -> installs SIGINT handler that falls back to detached
+ *  (ST9) token-limit path calls handleTokenLimitInline unconditionally
+ *  (ST10) use-detached-auto-resume flag + resolver fully removed
+ *  (ST11) SIGINT during inline wait exits cleanly (no detached fallback)
  *  (ST12) Inline countdown format: ⏳ Session resets in HH:MM:SS
- *  (ST13) Inline-failed -> falls back to detached (catch block in runPipeline)
+ *  (ST13) Inline-failed -> surfaces manual hresume guidance
+ *  (ST15) legacy auto-resume-mode fallback removed
  *  (ST14) WorkingDirectory passed to ClaudeHarnessAutoResume Register-ScheduledTask action
  */
 
@@ -36,34 +37,21 @@ function test(name, fn) {
   catch (e) { _failed++; console.error('FAIL', name, '\n', e.stack || e.message); process.exitCode = 1; }
 }
 
-// ── ClaudeHarnessAutoResume ───────────────────────────────────────────────────
+// ── ClaudeHarnessAutoResume (removed — inline-only auto-resume) ──────────────
 
-// Requirement: ClaudeHarnessAutoResume task scheduled via Register-ScheduledTask with correct name
-// (README line 71: "One-shot at the parsed token-limit reset time")
-test('(ST1a) ClaudeHarnessAutoResume task name constant', () => {
-  assert.ok(/ClaudeHarnessAutoResume/.test(runAgentSrc),
-    'run-agent.js must reference ClaudeHarnessAutoResume task name');
-  const taskNameLine = runAgentSrc.match(/const taskName = '(.+?)'/);
-  assert.ok(taskNameLine && taskNameLine[1] === 'ClaudeHarnessAutoResume',
-    'taskName must equal "ClaudeHarnessAutoResume"');
+// Requirement: scheduleSharedWake + ClaudeHarnessAutoResume task plumbing fully
+// deleted alongside the `use-detached-auto-resume` flag. No OS-level wake task
+// is registered for token-limit interruptions any more.
+test('(ST1a) ClaudeHarnessAutoResume task plumbing fully removed', () => {
+  assert.ok(!/ClaudeHarnessAutoResume/.test(runAgentSrc),
+    'ClaudeHarnessAutoResume task name must not appear in run-agent.js');
+  assert.ok(!/function scheduleSharedWake/.test(runAgentSrc),
+    'scheduleSharedWake function must be deleted');
+  assert.ok(!/Register-ScheduledTask/.test(runAgentSrc),
+    'Register-ScheduledTask plumbing must be gone from run-agent.js');
 });
 
-// Requirement: scheduleSharedWake scriptPath uses src/auto-resume.js (post-reorganisation)
-// (README: "Schedules one detached one-shot OS task")
-test('(ST1b) scheduleSharedWake scriptPath points to src/auto-resume.js', () => {
-  assert.ok(/path\.join\(HARNESS, 'src', 'auto-resume\.js'\)/.test(runAgentSrc),
-    'scheduleSharedWake scriptPath must use HARNESS/src/auto-resume.js');
-});
-
-// Requirement: WorkingDirectory passed to Register-ScheduledTask so node starts in correct dir
-// (README line 480: "The fix (already applied): task action passes -WorkingDirectory <repoRoot>")
-test('(ST14) ClaudeHarnessAutoResume Register-ScheduledTask includes WorkingDirectory', () => {
-  // scheduleSharedWake PS command must use -WorkingDirectory
-  const wakeFnMatch = runAgentSrc.match(/function scheduleSharedWake[\s\S]*?\n\}/);
-  assert.ok(wakeFnMatch, 'scheduleSharedWake function must exist');
-  assert.ok(/-WorkingDirectory/.test(wakeFnMatch[0]),
-    'Register-ScheduledTask action must specify -WorkingDirectory');
-});
+// (ST14 removed — WorkingDirectory check is moot now that scheduleSharedWake is gone.)
 
 // ── ClaudeHarnessModelsRefresh ────────────────────────────────────────────────
 
@@ -158,75 +146,69 @@ test('(ST8) auto-resume-on-token-limit: false disables auto-resume block', () =>
     'token-reset path must check autoResume flag');
 });
 
-// ── use-detached-auto-resume ──────────────────────────────────────────────────
+// ── inline-only auto-resume (use-detached-auto-resume flag removed) ──────────
 
-// Requirement: use-detached-auto-resume: false -> calls handleTokenLimitInline (inline countdown)
-// (README line 528-529: "terminal blocks with a live countdown")
-test('(ST9) use-detached-auto-resume: false -> handleTokenLimitInline called', () => {
-  assert.ok(/!useDetached/.test(runAgentSrc), '!useDetached condition must exist');
+// Requirement: token-limit auto-resume path always calls handleTokenLimitInline
+// (the live countdown), with no detached-vs-inline branch and no detached fallback.
+test('(ST9) token-limit path calls handleTokenLimitInline unconditionally', () => {
   assert.ok(/handleTokenLimitInline\(instant, pipelineName, i\)/.test(runAgentSrc),
-    'inline path must call handleTokenLimitInline');
+    'inline path must call handleTokenLimitInline with the pipeline+phase index');
 });
 
-// Requirement: use-detached-auto-resume: true -> scheduleSharedWake called (detached OS task)
-// (README: "schedules an OS task and exits immediately")
-test('(ST10) use-detached-auto-resume: true -> scheduleSharedWake + exit message', () => {
-  assert.ok(/scheduleSharedWake\(instant\.getTime\(\)\)/.test(runAgentSrc),
-    'detached path must call scheduleSharedWake');
-  assert.ok(/You may close this CLI/.test(runAgentSrc),
-    'detached path must tell user they can close the CLI');
+// Requirement: the use-detached-auto-resume flag and its resolver are gone.
+test('(ST10) use-detached-auto-resume flag fully removed', () => {
+  assert.ok(!/use-detached-auto-resume/.test(runAgentSrc),
+    '"use-detached-auto-resume" must not appear in run-agent.js');
+  assert.ok(!/resolveUseDetachedAutoResume/.test(runAgentSrc),
+    'resolveUseDetachedAutoResume helper must be deleted');
+  assert.ok(!/You may close this CLI/.test(runAgentSrc),
+    'detached "You may close this CLI" message must be removed');
 });
 
-// Requirement: SIGINT during inline countdown -> installs SIGINT handler that falls back to detached
-// (README line 470: "If the terminal is closed or Ctrl-C is pressed during the countdown,
-//  the harness catches the signal, automatically falls back to the detached path")
-test('(ST11) SIGINT handler installed during inline wait -> falls back to detached', () => {
+// Requirement: SIGINT during inline countdown -> exits cleanly (no detached fallback)
+test('(ST11) SIGINT during inline wait exits cleanly without scheduling detached task', () => {
   assert.ok(/process\.once\('SIGINT', sigintHandler\)/.test(runAgentSrc),
     'SIGINT handler must be installed during inline wait');
-  assert.ok(/falling back to detached/.test(runAgentSrc),
-    'signal handler must log fallback-to-detached message');
-  assert.ok(/scheduleSharedWake\(resetMs\)/.test(runAgentSrc),
-    'signal handler must call scheduleSharedWake to register OS task');
+  assert.ok(!/falling back to detached/.test(runAgentSrc),
+    'no "falling back to detached" log lines should remain');
   assert.ok(/process\.exit\(0\)/.test(runAgentSrc),
-    'signal handler must exit(0) after scheduling detached task');
+    'signal handler must still exit(0)');
+  // Lock the inline-only contract: signal path must NOT call scheduleSharedWake
+  // (helper is removed) nor enqueueWake — otherwise the "no detached fallback"
+  // promise quietly regresses.
+  assert.ok(!/scheduleSharedWake\(/.test(runAgentSrc),
+    'no scheduleSharedWake call sites should remain anywhere in run-agent.js');
+  const onSignalBody = runAgentSrc.match(/const onSignal = \(sig\) => \{[\s\S]*?\n  \};/);
+  assert.ok(onSignalBody, 'onSignal handler must exist');
+  assert.ok(!/enqueueWake\(/.test(onSignalBody[0]),
+    'signal handler must not enqueue a wake-queue entry');
 });
 
 // Requirement: Inline countdown displays "⏳ Session resets in HH:MM:SS"
-// (README lines 455-457: live countdown format)
 test('(ST12) inline countdown format: ⏳ Session resets in HH:MM:SS', () => {
   assert.ok(/⏳ Session resets in/.test(runAgentSrc),
     'countdown must display ⏳ Session resets in prefix');
-  // HH:MM:SS formatting via padStart(2,'0')
   assert.ok(/padStart\(2, '0'\)/.test(runAgentSrc),
     'countdown digits must be zero-padded to 2 chars');
   assert.ok(/✅ Session reset — resuming pipeline in-process/.test(runAgentSrc),
     'countdown end must display ✅ completion message');
 });
 
-// Requirement: Inline-failed -> catches error and falls back to detached
-// (README line 470: "On any failure of the inline path, the harness automatically falls back")
-test('(ST13) inline resume failure falls back to detached schedule', () => {
-  // catch block after handleTokenLimitInline try
+// Requirement: Inline-failure path no longer schedules a detached task — it
+// surfaces a manual-resume message pointing at `hrun <topic>-cont` (which
+// reads `.state/<topic>.json` saved by saveResumeState). `hresume` would not
+// work here because the token-limit branch does not enqueue a wake-queue job.
+test('(ST13) inline resume failure surfaces manual hrun -cont guidance', () => {
   assert.ok(/catch \(inlineErr\)/.test(runAgentSrc),
     'inline resume failure must be caught');
-  assert.ok(/Inline resume failed.*falling back to detached/.test(runAgentSrc),
-    'catch block must log fallback message');
-  // After catch, detached path (saveResumeState + enqueueWake + scheduleSharedWake) runs
-  const catchIdx = runAgentSrc.indexOf('Inline resume failed');
-  const afterCatch = runAgentSrc.slice(catchIdx, catchIdx + 400);
-  assert.ok(/saveResumeState/.test(afterCatch) || /enqueueWake/.test(afterCatch),
-    'after inline failure, detached resume state must be saved/enqueued');
+  assert.ok(/resume manually with \\`hrun \$\{topic\}-cont\\`/.test(runAgentSrc),
+    'catch block must point user at `hrun <topic>-cont`');
 });
 
-// ── resolveUseDetachedAutoResume ──────────────────────────────────────────────
-
-// Requirement: legacy autoResumeMode key translated to use-detached-auto-resume
-// (README line 529: "Replaces the legacy autoResumeMode: 'inline'|'detached' flag")
-test('(ST15) legacy autoResumeMode translated to use-detached-auto-resume', () => {
-  assert.ok(/auto-resume-mode/.test(runAgentSrc),
-    'legacy auto-resume-mode key must be read as fallback');
-  assert.ok(/resolveUseDetachedAutoResume/.test(runAgentSrc),
-    'resolveUseDetachedAutoResume helper must exist');
+// Requirement: legacy "auto-resume-mode" translation removed alongside the flag.
+test('(ST15) legacy auto-resume-mode key no longer read', () => {
+  assert.ok(!/auto-resume-mode/.test(runAgentSrc),
+    'legacy auto-resume-mode fallback must be removed');
 });
 
 // ── enqueueWake becameEarliest logic ─────────────────────────────────────────
@@ -240,26 +222,17 @@ test('(ST16) enqueueWake returns becameEarliest=true when queue starts empty', (
     'becameEarliest formula must cover both null and earlier-time cases');
 });
 
-// Requirement: enqueueWake returns false when existing job is earlier — avoids duplicate schtasks
-test('(ST17) enqueueWake returns becameEarliest=false when existing entry is earlier', () => {
-  // Same formula: `resetInstantMs < prevEarliest` is false when new job is later
+// Requirement: enqueueWake returns false when existing job is earlier — used
+// by the network-error branch to keep the wake-queue file deduplicated. The
+// scheduleSharedWake helper is intentionally GONE; do not re-introduce it.
+test('(ST17) enqueueWake becameEarliest=false formula intact; scheduleSharedWake stays removed', () => {
   assert.ok(/resetInstantMs < prevEarliest/.test(runAgentSrc),
     'enqueueWake must compare resetInstantMs < prevEarliest to determine priority');
-  // Caller: `if (becameEarliest) scheduleSharedWake(...)` — only register when truly earliest
-  assert.ok(/if \(becameEarliest\) scheduleSharedWake/.test(runAgentSrc),
-    'scheduleSharedWake must only be called when becameEarliest is true');
+  assert.ok(!/function scheduleSharedWake/.test(runAgentSrc),
+    'scheduleSharedWake must remain deleted — inline-only auto-resume is the contract');
 });
 
-// ── scheduleSharedWake non-Windows path ───────────────────────────────────────
-
-// Requirement: non-Windows uses `at -t` Unix scheduling (README: "or 'at' on Unix")
-test('(ST18) scheduleSharedWake non-Windows uses at -t command', () => {
-  // Windows path uses Register-ScheduledTask; Unix path uses `at -t`
-  assert.ok(/at -t/.test(runAgentSrc),
-    'scheduleSharedWake must use at -t on non-Windows');
-  assert.ok(/sh.*-c.*at -t/.test(runAgentSrc),
-    'at -t must be invoked via sh -c');
-});
+// (ST18 removed — scheduleSharedWake Unix `at -t` path no longer exists.)
 
 // ── waitUntilWithCountdown terminal prompt ────────────────────────────────────
 

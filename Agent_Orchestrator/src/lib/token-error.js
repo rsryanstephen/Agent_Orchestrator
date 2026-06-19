@@ -48,7 +48,10 @@ function classifyTokenError(stderrOrErrObj) {
 // Provider-specific transient signals. Generic "api error" removed -> false-positives on
 // benign log lines mentioning "API error". Require explicit HTTP status, Anthropic error
 // type, or canonical phrase. Anthropic api_error w/ 5xx -> matched via 5\d\d clause.
-const TRANSIENT_REGEX = /\b(429|5\d\d)\b|overloaded_error|\boverloaded\b|rate[_ -]?limit(?:ed)?|too many requests|service unavailable|temporarily unavailable|upstream_error/i;
+// `stream idle timeout` / `partial response received` added: the Claude CLI emits these
+// when a streamed response stalls mid-flight; it is transient (retry succeeds) so it must
+// retry-with-backoff instead of killing the pipeline via die().
+const TRANSIENT_REGEX = /\b(429|5\d\d)\b|overloaded_error|\boverloaded\b|rate[_ -]?limit(?:ed)?|too many requests|service unavailable|temporarily unavailable|upstream_error|stream idle timeout|partial response received/i;
 
 function classifyTransientError(stderrOrErrObj) {
   const buf = typeof stderrOrErrObj === 'string'
@@ -80,4 +83,64 @@ function classifyModelAvailabilityError(stderrOrErrObj) {
   return { kind: 'model-unavailable', model: m[1] ? m[1].trim() : null };
 }
 
-module.exports = { classifyTokenError, classifyTransientError, classifyModelAvailabilityError, MONTHLY_CAP_REGEX, RATE_RESET_REGEX, TRANSIENT_REGEX, MODEL_UNAVAILABLE_REGEX };
+// ── Context-window / prompt-too-long detection ─────────────────────────────
+// Matches Claude Code CLI strings emitted when the prompt exceeds the model's
+// context window. Distinct from rate/monthly token caps: the FIX is to swap
+// model or clear memory, not wait for a reset clock. Pattern list kept here as
+// one constant so future CLI string changes only require one edit point.
+// Why: previously this surfaced to the user as cryptic `Claude exited with code 1`
+//      which masked the actionable signal (switch model / clear memory).
+// Anchored to context-window overflow shapes only. The earlier broad
+// `invalid_request_error[\s\S]{0,200}?tokens` half false-positived on auth/billing
+// errors that happened to mention "tokens" (e.g. "invalid api token"); the tighter
+// pattern requires explicit context/prompt-length wording near the tokens noun so
+// rate/billing failures are NOT mis-routed into the "switch model / clear memory"
+// branch. Each alternative is a distinct Anthropic/Claude CLI overflow signature.
+const CONTEXT_LIMIT_REGEX = /Prompt is too long|context length|maximum context|context window|input is too long|tokens?\s+exceeds?\s+(?:the\s+)?(?:model['']?s\s+)?(?:maximum|limit|context)|invalid_request_error[\s\S]{0,200}?(?:prompt|context|input)[\s\S]{0,40}?tokens|tokens[\s\S]{0,40}?(?:exceed|exceeds|exceeded|too\s+long|too\s+many)[\s\S]{0,80}?(?:context|window|limit|maximum)/i;
+
+// Returns { kind: 'context-limit' } when the buffer carries a context-window
+// overflow signature. Caller surfaces a dedicated user-facing message.
+function classifyContextLimitError(stderrOrErrObj) {
+  const buf = typeof stderrOrErrObj === 'string'
+    ? stderrOrErrObj
+    : (stderrOrErrObj && (stderrOrErrObj.stderrBuf || stderrOrErrObj.message || ''));
+  if (!buf) return { kind: null };
+  if (CONTEXT_LIMIT_REGEX.test(buf)) return { kind: 'context-limit' };
+  return { kind: null };
+}
+
+// Typed error thrown / tagged on Provider failures when the CLI reports a
+// context-window overflow. Carries `model` + `phase` so the caller can render
+// an actionable message (switch model / clear memory) instead of "exited 1".
+class TokenLimitError extends Error {
+  constructor(message, { model = null, phase = null } = {}) {
+    super(message);
+    this.name = 'TokenLimitError';
+    this.contextLimitHit = true;
+    this.model = model;
+    this.phase = phase;
+  }
+}
+
+// Provider-specific token/quota-exhaustion signatures used to trigger the
+// cross-provider fallback chain in run-agent.js. Distinct from Claude's rate
+// regex above because Copilot/Gemini emit no machine-parseable reset clock —
+// detection alone is enough to swap to the next provider in `fallback-providers`.
+const PROVIDER_TOKEN_EXHAUSTED_REGEX = /\bquota\s+(?:exceeded|exhausted)\b|resource[_ ]exhausted|premium\s+request|monthly\s+request\s+limit|tokens?\s+(?:have\s+)?run\s+out|usage\s+limit\s+exceeded|insufficient\s+quota/i;
+
+// Returns { kind: 'tokens-exhausted' } if the error text matches a provider-quota
+// signature OR carries an explicit `tokensExhausted` flag set by registry.js.
+// Used by run-agent.js to decide whether to consult `fallback-providers`.
+function classifyTokensExhausted(stderrOrErrObj) {
+  if (stderrOrErrObj && typeof stderrOrErrObj === 'object' && stderrOrErrObj.tokensExhausted) {
+    return { kind: 'tokens-exhausted' };
+  }
+  const buf = typeof stderrOrErrObj === 'string'
+    ? stderrOrErrObj
+    : (stderrOrErrObj && (stderrOrErrObj.stderrBuf || stderrOrErrObj.message || ''));
+  if (!buf) return { kind: null };
+  if (PROVIDER_TOKEN_EXHAUSTED_REGEX.test(buf)) return { kind: 'tokens-exhausted' };
+  return { kind: null };
+}
+
+module.exports = { classifyTokenError, classifyTransientError, classifyModelAvailabilityError, classifyTokensExhausted, classifyContextLimitError, TokenLimitError, MONTHLY_CAP_REGEX, RATE_RESET_REGEX, TRANSIENT_REGEX, MODEL_UNAVAILABLE_REGEX, PROVIDER_TOKEN_EXHAUSTED_REGEX, CONTEXT_LIMIT_REGEX };

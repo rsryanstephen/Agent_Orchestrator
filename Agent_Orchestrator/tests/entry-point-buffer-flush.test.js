@@ -163,20 +163,6 @@ test('successful flush sets HARNESS_EDITOR_FLUSHED=1 so spawned children inherit
   }
 });
 
-// ── (7) Module honours explicit "" opt-out (pure-CLI users) ───────────────────
-test('module respects explicit empty-string opt-out (no spawn for pure-CLI users)', () => {
-  const { flushEditorBuffers } = require(MODULE);
-  // Pass an explicit "" via topicConfig override; spawnSync must NOT fire.
-  // We assert by spying on child_process via require cache invalidation.
-  const cp = require('child_process');
-  const orig = cp.spawnSync;
-  let spawned = false;
-  cp.spawnSync = function () { spawned = true; return { status: 0 }; };
-  try {
-    flushEditorBuffers({ 'editor-save-all-command': '' }, {});
-  } finally {
-    cp.spawnSync = orig;
-  }
-  assert.strictEqual(spawned, false,
-    'explicit "" in topicConfig must skip spawn (opt-out path)');
-});
+// ── (7) Flush is hardcoded — config no longer gates it; only the inherited
+// HARNESS_EDITOR_FLUSHED guard skips the spawn (covered by 6b above). The former
+// explicit-"" opt-out was removed when the flush became non-configurable.

@@ -311,13 +311,22 @@ function parseStream(exitCode, logDir, stderrBuf, stdoutBuf, opts) {
 
 // ── Skills inline injection (gap #3 workaround) ───────────────────────────────
 
-const INLINE_SKILLS = ['caveman', 'interrogate', 'strict-assessment'];
+// Full set of skills that can be injected inline. registry.js filters this list
+// down to the subset enabled by global-config.json flags before calling.
+const INLINE_SKILLS = ['caveman', 'interrogate', 'strict-assessment', 'karpathy-guidelines'];
 
-function injectSkillsInline(prompt, skillsDir) {
+// enabledSkills: optional array filtered by registry from global-config flags.
+function injectSkillsInline(prompt, enabledSkills, skillsDir) {
+  // Support legacy two-arg call (prompt, skillsDir) where enabledSkills was absent
+  if (typeof enabledSkills === 'string' || enabledSkills == null && typeof skillsDir === 'undefined') {
+    skillsDir = enabledSkills;
+    enabledSkills = null;
+  }
   if (capabilities.skillsRuntime) return prompt;
+  const activeSkills = Array.isArray(enabledSkills) ? enabledSkills : INLINE_SKILLS;
   const dir = skillsDir || path.join(__dirname, '..', '..', '..', 'skills');
   const sections = [];
-  for (const skill of INLINE_SKILLS) {
+  for (const skill of activeSkills) {
     const skillPath = path.join(dir, skill, 'SKILL.md');
     try {
       const content = fs.readFileSync(skillPath, 'utf8').trim();

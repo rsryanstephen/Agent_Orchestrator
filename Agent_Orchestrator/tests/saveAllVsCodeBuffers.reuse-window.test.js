@@ -1,96 +1,52 @@
 #!/usr/bin/env node
 'use strict';
 
-// Editor-agnostic buffer-flush: the harness no longer auto-injects --reuse-window.
-// The user supplies the full recipe via `editor-save-all-command` and it is passed
-// to spawnSync verbatim. This test asserts:
-//   1. The default config string keeps `--reuse-window` so existing VS Code users
-//      don't suddenly start spawning new windows on upgrade.
-//   2. No auto-injection logic remains in `flushEditorBuffers` (formerly
-//      `saveAllVsCodeBuffers`) — passing the cmd through verbatim is what makes
-//      the abstraction editor-agnostic.
-//   3. Both spawnSync calls (initial + Windows `.cmd` retry) still share the same
-//      `rest` args array, so any flags configured by the user reach the retry.
+// The buffer flush is now keystroke-only and editor-agnostic — no spawn-command
+// override, no `--reuse-window` injection. The Save-All chord defaults to the VS
+// Code `^(k)s` (auto-detected from keybindings.json when present). This test asserts:
+//   1. No `--reuse-window` injection logic remains in run-agent.js flushEditorBuffers.
+//   2. The back-compat alias `saveAllVsCodeBuffers` still points to flushEditorBuffers.
+//   3. The default resolved chord (no keybindings override) is `^(k)s`.
 //
 //   node Agent_Orchestrator/tests/saveAllVsCodeBuffers.reuse-window.test.js
 
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const configUtils = require('../src/config-utils');
 
 const HARNESS = path.join(__dirname, '..');
 const RUN_AGENT = path.join(HARNESS, 'src', 'run-agent.js');
-const GLOBAL = path.join(HARNESS, 'global-config.json');
+const FLUSH = path.join(HARNESS, 'src', 'editor-buffer-flush.js');
 const src = fs.readFileSync(RUN_AGENT, 'utf8');
-const globalCfg = configUtils.loadConfig(GLOBAL);
+const { resolveSaveAllChord } = require(FLUSH);
 
 function test(name, fn) {
   try { fn(); console.log('PASS', name); }
   catch (e) { console.error('FAIL', name, '\n', e.stack || e.message); process.exitCode = 1; }
 }
 
-test('default editor-save-all-command includes --reuse-window (VS Code recipe)', () => {
-  assert.strictEqual(
-    globalCfg['editor-save-all-command'],
-    'code --reuse-window --command workbench.action.files.saveAll',
-    'default global-config should keep --reuse-window in the default VS Code recipe'
-  );
-});
-
-test('flushEditorBuffers does NOT auto-inject --reuse-window (editor-agnostic verbatim pass-through)', () => {
+test('flushEditorBuffers does NOT inject --reuse-window (editor-agnostic)', () => {
   const fn = src.match(/function flushEditorBuffers\([^)]*\)[\s\S]*?\n\}/);
   assert.ok(fn, 'flushEditorBuffers block found');
-  assert.ok(
-    !/rest\.unshift\(['"]--reuse-window['"]\)/.test(fn[0]),
-    'auto-injection of --reuse-window must be removed (editor-agnostic pass-through)'
-  );
-  assert.ok(
-    !/rest\.includes\(['"]--reuse-window['"]\)/.test(fn[0]),
-    'guard for --reuse-window must be removed'
-  );
+  assert.ok(!/--reuse-window/.test(fn[0]),
+    'no --reuse-window injection must remain (editor-agnostic keystroke flush)');
 });
 
-test('both spawnSync calls share the same rest array (user flags propagate to retry)', () => {
+test('flushEditorBuffers no longer spawns an external editor CLI (delegates to keystroke)', () => {
   const fn = src.match(/function flushEditorBuffers\([^)]*\)[\s\S]*?\n\}/);
   assert.ok(fn, 'flushEditorBuffers block found');
-  const body = fn[0];
-  const initial = body.match(/let r = spawnSync\(bin, (\w+), \{[^}]*shell:\s*false/);
-  const retry = body.match(/r = spawnSync\(retryBin, (\w+), \{[^}]*shell:\s*true/);
-  assert.ok(initial && retry, 'both spawnSync calls present');
-  assert.strictEqual(initial[1], retry[1], 'initial + retry must pass the same args variable');
-  assert.strictEqual(initial[1], 'rest', 'spawnSync args var must be `rest`');
+  assert.ok(/flushViaKeystroke\(\)/.test(fn[0]), 'must delegate to flushViaKeystroke()');
+  assert.ok(!/spawnSync\(/.test(fn[0]), 'must not spawn an editor CLI directly');
 });
 
 test('back-compat alias saveAllVsCodeBuffers still exists and points to flushEditorBuffers', () => {
-  assert.ok(
-    /const\s+saveAllVsCodeBuffers\s*=\s*flushEditorBuffers/.test(src),
-    'expected `const saveAllVsCodeBuffers = flushEditorBuffers;` alias for back-compat'
-  );
+  assert.ok(/const\s+saveAllVsCodeBuffers\s*=\s*flushEditorBuffers/.test(src),
+    'expected `const saveAllVsCodeBuffers = flushEditorBuffers;` alias for back-compat');
 });
 
-test('user-supplied verbatim cmd reaches spawn args without modification', () => {
-  // Behavioral replica of the tokenize-then-spawn path. The harness must pass
-  // through `--reuse-window` (or NOT) exactly as the user configured it.
-  const calls = [];
-  const fakeSpawnSync = (bin, args) => {
-    calls.push({ bin, args: args.slice() });
-    return { status: 0, error: null };
-  };
-  function flushReplica(cmd) {
-    const parts = cmd.match(/(?:"[^"]*"|'[^']*'|\S+)/g) || [];
-    const argv = parts.map(p => p.replace(/^["']|["']$/g, ''));
-    const [bin, ...rest] = argv;
-    fakeSpawnSync(bin, rest, { shell: false });
-  }
-  flushReplica('subl --command save_all');
-  assert.strictEqual(calls[0].bin, 'subl');
-  assert.deepStrictEqual(calls[0].args, ['--command', 'save_all'],
-    'Sublime recipe must pass through verbatim — no --reuse-window injection');
-
-  calls.length = 0;
-  flushReplica('cursor --reuse-window --command workbench.action.files.saveAll');
-  assert.strictEqual(calls[0].bin, 'cursor');
-  assert.ok(calls[0].args.includes('--reuse-window'),
-    'user-configured --reuse-window must reach spawn args');
+test('default resolved chord (no override) is the VS Code Save-All ^(k)s', () => {
+  // procName null -> no keybindings file -> fallback chord.
+  assert.strictEqual(resolveSaveAllChord({ procName: null }), '^(k)s');
 });
+
+console.log('done');

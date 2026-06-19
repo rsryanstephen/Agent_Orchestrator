@@ -154,4 +154,29 @@ test('(10) dequeueFirstUnheld: remainingCount unchanged + file unchanged on unkn
   assert.strictEqual(readQueue(d), initial, 'queue file must be byte-identical after unknown-shorthand');
 });
 
+// ── (11) bare shorthand + inline hold: `pcaf (hold)` ────────────────────────
+// Spec: "The header may also include a hold marker such as `Pipeline: caf (hold)`
+// or `pcaf (hold)` to skip that block during dequeue and leave it in place."
+test('(11) parseBlock: `pcaf (hold)` sets held=true and pipeline=pcaf', () => {
+  const list = promptQueue.readShorthandList();
+  const parsed = promptQueue.parseBlock('pcaf (hold)\nSpec-hold body\n', list);
+  assert.strictEqual(parsed.held, true, 'pcaf (hold) must set held=true');
+  assert.strictEqual(parsed.pipeline, 'pcaf', 'pipeline must be pcaf with (hold) stripped');
+  assert.ok(parsed.body.includes('Spec-hold body'), 'body must contain the actual prompt');
+  assert.ok(!/\(hold\)/i.test(parsed.body), 'body must not contain (hold) marker');
+});
+
+test('(11b) dequeueFirstUnheld: `pcaf (hold)` block skipped and left in file', () => {
+  const d = tmpdir();
+  writeQueue(d, 'pcaf (hold)\nHeld prompt\n\n---\n\ncaf\nUnheld prompt\n');
+  const r = promptQueue.dequeueFirstUnheld(d, { defaultPipeline: 'all', log: () => {} });
+  assert.ok(r && r.block, 'expected unheld block to be dequeued');
+  assert.strictEqual(r.skippedHeld, 1, 'must skip 1 held block (pcaf (hold))');
+  assert.ok(r.block.body.includes('Unheld prompt'), 'dequeued block must be the unheld one');
+  const after = readQueue(d);
+  assert.ok(after.includes('Held prompt'), 'pcaf (hold) block body must remain in queue file');
+  assert.ok(/pcaf\s*\(hold\)/i.test(after), 'pcaf (hold) header line itself must survive file rewrite');
+  assert.ok(!after.includes('Unheld prompt'), 'dequeued block must be removed');
+});
+
 if (_failed === 0) console.log('\nAll prompt-queue-hold-variants tests passed.');

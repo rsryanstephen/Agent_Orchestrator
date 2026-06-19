@@ -36,9 +36,20 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawnSync, spawn } = require('child_process');
 const configUtils = require('./config-utils');
-const { splitPromptIntoTasks, parsePlanningSubtasks, roleHeaderFor, ROLE_HEADER: ROLE_HEADER_LIB } = require('./lib/fan-out');
+// Shared keystroke-based editor flush (default mechanism). Imported so the main
+// pipeline's flushEditorBuffers and the parallel/auto-resume entry points use one
+// keystroke-flush implementation (hardcoded, non-configurable).
+// Import FLUSHED_ENV alongside flushViaKeystroke so this in-process copy honours
+// the same cross-process guard the entry-point flush sets — a spawned child must
+// not re-fire the keystroke chord (double focus-steal) when an ancestor already
+// flushed before spawning it.
+const { flushViaKeystroke, FLUSHED_ENV } = require('./editor-buffer-flush');
+const { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER: ROLE_HEADER_LIB } = require('./lib/fan-out');
 const { getProvider } = require('./lib/providers/registry');
-const { classifyTokenError } = require('./lib/token-error');
+// classifyTokensExhausted added to drive cross-provider fallback chain:
+// quota errors from non-Claude providers carry no rate-reset clock, so this
+// detector triggers the swap without depending on err.tokenReset.
+const { classifyTokenError, classifyTokensExhausted } = require('./lib/token-error');
 const { getAdvisorFlags } = require('./lib/advisor-flags');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -56,7 +67,8 @@ const PIPELINES = {
   'code-assess-fix': ['coding', 'assessment', 'fix'],
   'all': ['planning', 'coding', 'assessment', 'fix'],
 };
-const LATEST_OPUS = 'claude-opus-4-7';
+// Updated to claude-opus-4-8 per models-reference.md refresh (4-7 is superseded).
+const LATEST_OPUS = 'claude-opus-4-8';
 const LATEST_SONNET = 'claude-sonnet-4-6';
 const LATEST_HAIKU = 'claude-haiku-4-5-20251001';
 
@@ -113,7 +125,6 @@ function _loadProviderTiers(providerId) {
   }
   return _PROVIDER_AUTO_MODELS_STATIC[providerId] || { light: null, medium: null, heavy: null };
 }
-let CONTEXT_TRUNCATION = 400;
 const touchedDirs = new Set();
 const LOCK_PATH = path.join(__dirname, '..', '.global-config.lock');
 const DEFAULT_MAX_CONCURRENT_AGENTS = 4;
@@ -132,7 +143,13 @@ const ANY_RESPONSE_HEADER = '(?:Planning|Coding|Assessment)\\s+Agent(?:\\s+\\d+)
 // stale owners via `process.kill(pid, 0)` liveness probes.
 // =========================================================================
 function log(msg) { console.log(msg); }
-function die(msg) { console.error(`ERROR: ${msg}`); process.exit(1); }
+// Central fatal-exit helper. Now also fires the error sound before exiting so
+// every die() path is audible. playErrorSound is a hoisted function declaration,
+// so the forward reference resolves at call time; try/catch guards the early-load
+// case where sound config/deps are not ready and prevents a sound failure from
+// masking the real error. Master-switch + error-sound-file gating lives inside
+// _playSoundFile, so no extra gate is needed here.
+function die(msg) { console.error(`ERROR: ${msg}`); try { playErrorSound(); } catch {} process.exit(1); }
 
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -214,13 +231,51 @@ function statePathFor(topicName) { return path.join(STATE_DIR, `${topicName}.jso
 
 const ACTIVE_TOPICS_PATH = path.join(STATE_DIR, 'active-topics.json');
 
+// Live agents re-assert themselves every REFRESH_MS; an entry whose lastSeen is
+// older than TTL_MS is treated as stale even if its pid still probes alive. This
+// is the spawn-token / heartbeat that closes the Windows PID-reuse hole (a dead
+// agent's pid can be recycled by an unrelated process, defeating kill(pid,0)).
+const ACTIVE_TOPIC_REFRESH_MS = 15000;
+const ACTIVE_TOPIC_TTL_MS = 60000;
+
+// Liveness probe: a registry entry is stale if its owning process is gone.
+// process.kill(pid, 0) throws ESRCH for a dead pid. EPERM means the process
+// EXISTS but is owned by another user — treat that as ALIVE so we never prune a
+// live sibling. Treat our own pid as always alive.
+function _isPidAlive(pid) {
+  if (!pid) return false;
+  if (pid === process.pid) return true;
+  try { process.kill(pid, 0); return true; } catch (e) { return !!(e && e.code === 'EPERM'); }
+}
+
+// Read active topics for the heartbeat display. Drops entries whose owning
+// process is dead (process.on('exit') misses SIGKILL/hard exits, so stale
+// dead-pid entries otherwise accumulate forever and inflate the topic list),
+// then dedupes by name so the same topic isn't printed dozens of times.
 function readActiveTopics() {
   try {
     const raw = JSON.parse(fs.readFileSync(ACTIVE_TOPICS_PATH, 'utf8'));
-    return Array.isArray(raw.topics) ? raw.topics.map(t => t.name).filter(Boolean) : [];
+    if (!Array.isArray(raw.topics)) return [];
+    const seen = new Set();
+    const names = [];
+    const now = Date.now();
+    for (const t of raw.topics) {
+      if (!t || !t.name || !_isPidAlive(t.pid)) continue;
+      // PID-reuse guard: kill(pid,0) can report a recycled pid as alive, so an
+      // entry whose heartbeat (lastSeen) has gone stale is dropped regardless.
+      // Legacy entries without lastSeen fall back to the pid-only check.
+      if (typeof t.lastSeen === 'number' && now - t.lastSeen > ACTIVE_TOPIC_TTL_MS) continue;
+      if (seen.has(t.name)) continue;
+      seen.add(t.name);
+      names.push(t.name);
+    }
+    return names;
   } catch { return []; }
 }
 
+// Register this process's topic. Self-heals the registry under lock by pruning
+// both this pid's prior entry AND any dead-pid entries left behind by crashed
+// siblings, preventing unbounded growth of the active-topics file.
 function registerActiveTopic(topicName) {
   if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
   const lock = acquireFileLock(ACTIVE_TOPICS_PATH);
@@ -228,10 +283,33 @@ function registerActiveTopic(topicName) {
     let state = { topics: [] };
     try { state = JSON.parse(fs.readFileSync(ACTIVE_TOPICS_PATH, 'utf8')); } catch {}
     if (!Array.isArray(state.topics)) state.topics = [];
-    state.topics = state.topics.filter(t => t && t.pid !== process.pid);
-    state.topics.push({ name: topicName, pid: process.pid });
+    // Self-heal: drop this pid's prior entry, dead-pid entries, AND entries whose
+    // heartbeat has gone stale (TTL) so a recycled pid can't keep a ghost alive.
+    const now = Date.now();
+    state.topics = state.topics.filter(t => t && t.pid !== process.pid && _isPidAlive(t.pid)
+      && !(typeof t.lastSeen === 'number' && now - t.lastSeen > ACTIVE_TOPIC_TTL_MS));
+    state.topics.push({ name: topicName, pid: process.pid, started: now, lastSeen: now });
     fs.writeFileSync(ACTIVE_TOPICS_PATH, JSON.stringify(state, null, 2) + '\n', 'utf8');
   } finally { releaseFileLock(lock); }
+}
+
+// Refresh this process's lastSeen under lock so a long-running agent stays fresh.
+// A recycled pid never runs this against our entry, so the stale entry ages out
+// via the TTL check in readActiveTopics — eliminating PID-reuse ghosts.
+function touchActiveTopic() {
+  try {
+    if (!fs.existsSync(ACTIVE_TOPICS_PATH)) return;
+    const lock = acquireFileLock(ACTIVE_TOPICS_PATH);
+    try {
+      let state = { topics: [] };
+      try { state = JSON.parse(fs.readFileSync(ACTIVE_TOPICS_PATH, 'utf8')); } catch {}
+      if (!Array.isArray(state.topics)) return;
+      const mine = state.topics.find(t => t && t.pid === process.pid);
+      if (!mine) return;
+      mine.lastSeen = Date.now();
+      fs.writeFileSync(ACTIVE_TOPICS_PATH, JSON.stringify(state, null, 2) + '\n', 'utf8');
+    } finally { releaseFileLock(lock); }
+  } catch {}
 }
 
 function unregisterActiveTopic() {
@@ -255,9 +333,22 @@ function loadResumeState(topicName) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
+// Holds the active per-prompt `## User Prompt` header model/provider override
+// (set at dispatch when a header is recognised). Module-level so the per-phase
+// `saveResumeState` writes below can fold it into the persisted resume state.
+let _promptHeaderResumeOverride = null;
+
 function saveResumeState(topicName, state) {
   if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(statePathFor(topicName), JSON.stringify(state, null, 2) + '\n', 'utf8');
+  // Persist any active per-prompt header model/provider into the resume state.
+  // The header line is physically stripped from history on first dispatch, so a
+  // later auto-resume cannot re-parse it; without this the resumed run silently
+  // reverts to the default model/provider. (QA: resume-loses-header-overrides.)
+  const _ov = _promptHeaderResumeOverride;
+  const merged = (_ov && (_ov.model || _ov.provider))
+    ? { ...state, headerModel: _ov.model || undefined, headerProvider: _ov.provider || undefined }
+    : state;
+  fs.writeFileSync(statePathFor(topicName), JSON.stringify(merged, null, 2) + '\n', 'utf8');
 }
 
 function clearResumeState(topicName) {
@@ -411,64 +502,29 @@ function enqueueWake(topicName, pipelineName, phaseIndex, resetInstantMs) {
   }
 }
 
-function scheduleSharedWake(resetInstantMs) {
-  const when = new Date(resetInstantMs);
-  const pad = n => String(n).padStart(2, '0');
-  const taskName = 'ClaudeHarnessAutoResume';
-  const scriptPath = path.join(HARNESS, 'src', 'auto-resume.js');
-  if (process.platform === 'win32') {
-    // PowerShell Register-ScheduledTask is locale-independent (avoids schtasks date-format errors).
-    const isoLocal = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}T${pad(when.getHours())}:${pad(when.getMinutes())}:00`;
-    const psCmd =
-      `$ErrorActionPreference='Stop';` +
-      `$a=New-ScheduledTaskAction -Execute 'node' -Argument '"${scriptPath.replace(/'/g, "''")}"' -WorkingDirectory '${ROOT.replace(/'/g, "''")}';` +
-      `$t=New-ScheduledTaskTrigger -Once -At ([datetime]'${isoLocal}');` +
-      `$s=New-ScheduledTaskSettingsSet -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;` +
-      `Register-ScheduledTask -TaskName '${taskName}' -Action $a -Trigger $t -Settings $s -Force | Out-Null`;
-    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8' });
-    if (r.status !== 0) {
-      log(`Warning: failed to schedule auto-resume task (${(r.stderr || r.stdout || 'unknown').trim()}). Run \`node ${path.relative(ROOT, scriptPath)}\` manually after reset.`);
-    } else {
-      log(`Auto-resume scheduled via Register-ScheduledTask for ${isoLocal}.`);
-    }
-  } else {
-    const cmd = `node "${scriptPath}"`;
-    const epochSec = Math.floor(resetInstantMs / 1000);
-    const r = spawnSync('sh', ['-c', `echo "${cmd}" | at -t $(date -d @${epochSec} +%Y%m%d%H%M.%S) 2>&1`], { encoding: 'utf8' });
-    if (r.status !== 0) {
-      log(`Warning: failed to schedule auto-resume via 'at' (${r.stderr || r.stdout || 'unknown'}). Run \`node ${path.relative(ROOT, scriptPath)}\` manually after reset.`);
-    } else {
-      log(`Auto-resume scheduled via 'at' for ${when.toString()}.`);
-    }
-  }
-}
+// `scheduleSharedWake` and the OS-level scheduled-task plumbing were removed
+// when the detached-auto-resume config option was deleted — inline countdown is
+// now the only token-limit recovery path, so no OS wake task is registered.
+// `enqueueWake` is retained: the network-error branch still writes resume
+// metadata that `auto-resume.js` (`hresume`) consumes on manual re-run.
 
 // =========================================================================
 // Concurrency / fleet sizing helpers + parallel-coding brief-header builder.
 // =========================================================================
-function resolveUseDetachedAutoResume() {
-  const v = configUtils.cfgRead(topicConfig, config, 'use-detached-auto-resume', null);
-  if (typeof v === 'boolean') return v;
-  // Legacy: `autoResumeMode: "inline" | "detached"` — translate.
-  const legacy = configUtils.cfgRead(topicConfig, config, 'auto-resume-mode', null);
-  if (legacy === 'detached') return true;
-  if (legacy === 'inline') return false;
-  return false;
-}
-
 function getMaxConcurrentAgents() {
-  // Prefer new key `max-parallel-agents-per-topic`; fall back to legacy `max-concurrent-agents`.
-  let v = configUtils.cfgRead(topicConfig, config, 'max-parallel-agents-per-topic', null);
-  if (v == null) v = configUtils.cfgRead(topicConfig, config, 'max-concurrent-agents', null);
-  if (v === 1) return 1;
-  if (typeof v === 'number' && v > 0) return v;
-  return DEFAULT_MAX_CONCURRENT_AGENTS;
+  // Delegate to the pure scope-specificity resolver in config-utils so the
+  // topic-over-global precedence (across both the new and legacy keys) is
+  // unit-testable without spawning the CLI. Bug fixed: a GLOBAL
+  // `max-parallel-agents-per-topic` previously shadowed a TOPIC
+  // `max-concurrent-agents`.
+  return configUtils.resolveMaxConcurrentAgents(topicConfig, config, DEFAULT_MAX_CONCURRENT_AGENTS);
 }
 
 function getParallelAssessmentAgents() {
   // Default false: assessment + fix stay serial even when coding fanned out.
-  const v = configUtils.cfgRead(topicConfig, config, 'parallel-assessment-agents', false);
-  return v === true || v === 'true';
+  // Delegate to the pure resolver in config-utils so the documented
+  // topic-over-global, true/"true"-only behaviour is unit-testable.
+  return configUtils.resolveParallelAssessmentAgents(topicConfig, config);
 }
 
 function buildParallelCodingBriefHeader(taskCount) {
@@ -535,7 +591,15 @@ function parseConversationContext(filePath) {
   // their own optional `(Remediation ...)` / `(task-N)` variants in ANY_RESPONSE_HEADER) keep their
   // prior split semantics — preventing accidental new split-points in downstream consumers.
   const headerSplit = new RegExp(`^(##\\s+(?:User Prompt(?:\\s+\\([^)\\n]*\\))?|User Reply to Questions|Auto Reply to Clarifying Questions|Auto Answer|${ANY_RESPONSE_HEADER}))\\s*$`, 'gim');
-  const parts = masked.split(headerSplit);
+  let parts = masked.split(headerSplit);
+  // Intentionally NO archive fallback here. Archived `## User Prompt` blocks
+  // must NOT surface through this path — downstream dispatchers (`runPlanning`,
+  // `runCoding`) treat trailing parsed blocks as actionable, so resurrecting
+  // a stale archive prompt would cause re-execution. The dedicated
+  // `buildHistoryPreamble` path supplies archived RESPONSES (read-only,
+  // context-only) for stateless providers — keep the two paths independent
+  // to avoid both stale-prompt resurrection AND double-injection of the same
+  // archived responses (once as preamble, once as parsed context).
   if (parts.length < 3) return null;
 
   let blocks = [];
@@ -559,13 +623,41 @@ function parseConversationContext(filePath) {
   return blocks.map(block => {
     let text = block.text;
     if (/agent response/i.test(block.header)) {
+      // Strip only the trailing *Model: ...* footer; full body now ships untruncated
+      // because prior-turn lookup is handled lazily by the history-self-lookup skill.
       text = text.replace(/\n\n\*Model:[\s\S]*?\*\s*$/, '');
-      if (text.length > CONTEXT_TRUNCATION) {
-        text = text.slice(0, CONTEXT_TRUNCATION) + '\n...[truncated to save tokens]';
-      }
     }
     return `${block.header}\n\n${text}`;
   }).join('\n\n');
+}
+
+// =========================================================================
+// history-self-lookup skill wiring: load the approved SKILL.md, strip its
+// YAML frontmatter, and substitute the runtime placeholders so MAIN-role
+// agents fetch prior-turn context lazily via `Read` instead of relying only
+// on the parsed current-turn dump. Returns '' when the skill file is missing
+// so payload builders degrade gracefully. Parallel fan-out paths intentionally
+// do NOT call this — their subtask prompts stay deterministic/self-contained.
+// =========================================================================
+function buildHistorySelfLookupBlock(historyFilePath) {
+  const skillPath = path.join(__dirname, '..', 'skills', 'history-self-lookup', 'SKILL.md');
+  let body;
+  try { body = fs.readFileSync(skillPath, 'utf8'); }
+  catch { return ''; }
+  // Strip leading YAML frontmatter so only the instructional body ships to the agent.
+  body = body.replace(/^---\n[\s\S]*?\n---\n/, '');
+  // Resolve absolute history path + line count via Node fs (not shell) for the Read offset hint.
+  const absHistory = path.resolve(historyFilePath);
+  let lineCount = 0;
+  try { lineCount = fs.readFileSync(absHistory, 'utf8').split('\n').length; }
+  catch { lineCount = 0; }
+  // Queue file sits beside the history file as prompt-queue.md.
+  const absQueue = path.join(path.dirname(absHistory), 'prompt-queue.md');
+  body = body
+    .replace(/<promptHistoryFile>/g, absHistory)
+    .replace(/<historyLineCount>/g, String(lineCount))
+    .replace(/<queueFile>/g, absQueue);
+  return `## History Self-Lookup (skill)\n\n${body.trim()}\n\n`;
 }
 
 function stripTrailingUserPrompt(filePath) {
@@ -610,6 +702,21 @@ function truncateHistoryIfAgentWrote(before, label = '') {
     let buf;
     try { buf = fs.readFileSync(historyPath); } catch { return; }
     if (buf.length > snap.size) {
+      // Concurrency guard (missing-prompt bug, 2026-06-18 `opus caf`/header-prompt
+      // loss). A SIBLING process can serially dequeue + `injectQueuedPromptIntoHistory`
+      // a real `## User Prompt (From the Queue)` block into the tail in the window
+      // between this phase's `snapshotHistorySize()` and this truncate. A blind
+      // `ftruncate` to `snap.size` then deletes that freshly-injected prompt (and any
+      // response written under it) — the exact observed permanent loss. Refuse to
+      // discard a tail that introduces a NEW `## User Prompt` header; leave the file
+      // intact so the concurrently-injected prompt survives. Agents are forbidden
+      // from writing the history file themselves, so legitimate growth never adds a
+      // `## User Prompt` header — only a racing inject does.
+      const discarded = buf.slice(snap.size).toString('utf8');
+      if (/(^|\n)\s*## User Prompt\b/.test(discarded)) {
+        appendAutoResumeLog(`truncateHistoryIfAgentWrote[${label}]: SKIPPED truncate — discarded tail (${buf.length - snap.size} bytes) contains a concurrently-injected "## User Prompt" block; refusing to clobber it.`);
+        return;
+      }
       const fd = fs.openSync(historyPath, 'r+');
       try { fs.ftruncateSync(fd, snap.size); } finally { fs.closeSync(fd); }
     }
@@ -632,7 +739,10 @@ function stripTrailingDivider(filePath) {
 const HISTORY_ARCHIVE_CLEAR_MARKER = '<!-- CLEAR CONTEXT -->';
 const DEFAULT_HISTORY_ARCHIVE_THRESHOLD = 4000;
 
-async function maybeAutoArchiveHistory(filePath, { summarizeContent: _summarize = null } = {}) {
+// Compression path removed: plain archive rotation only — no summary section
+// is ever injected, and the deprecated history-archive-compress-on-archive
+// config key is ignored if present.
+async function maybeAutoArchiveHistory(filePath) {
   if (!fs.existsSync(filePath)) return;
   let content;
   try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
@@ -653,8 +763,9 @@ async function maybeAutoArchiveHistory(filePath, { summarizeContent: _summarize 
 
   const backupName = path.basename(backupPath);
 
-  // Bug C: preserve user-typed (untagged, non-empty) trailing prompt body.
-  // Tagged headers like `(From the Queue)` are dropped so queue dequeue fires normally.
+  // Preserve user-typed (untagged, non-empty) trailing prompt body so a mid-edit
+  // prompt is not lost when the file is rolled over. Tagged headers like
+  // `(From the Queue)` are dropped so queue dequeue fires normally.
   const _trailingPromptRe = /(\n+(?:---\s*\n+)?)## User Prompt([^\n]*)\n((?:(?!\n## User Prompt)[\s\S])*)$/;
   const _tpm = _trailingPromptRe.exec(content);
   let _preservedPromptSuffix = '';
@@ -667,18 +778,7 @@ async function maybeAutoArchiveHistory(filePath, { summarizeContent: _summarize 
     }
   }
 
-  let summarySection = '';
-  const shouldCompress = (config && config['history-archive-compress-on-archive'] !== false) && typeof _summarize === 'function';
-  if (shouldCompress) {
-    try {
-      const summary = await _summarize(content);
-      if (summary) summarySection = `\n\n## Compressed Memory\n\n${summary}`;
-    } catch (err) {
-      log(`[harness] WARNING: history archive compress-on-archive failed: ${err.message}`);
-    }
-  }
-
-  const archiveContent = `${HISTORY_ARCHIVE_CLEAR_MARKER}${summarySection}\n\n## Coding Agent Response (History Archived)\n\nHistory file exceeded ${threshold} lines (${lineCount} lines). Full history backed up to \`${backupName}\`. Context resumes here.\n\n## User Prompt\n${_preservedPromptSuffix}`;
+  const archiveContent = `${HISTORY_ARCHIVE_CLEAR_MARKER}\n\n## Coding Agent Response (History Archived)\n\nHistory file exceeded ${threshold} lines (${lineCount} lines). Full history backed up to \`${backupName}\`. Context resumes here.\n\n## User Prompt\n${_preservedPromptSuffix}`;
   try { fs.writeFileSync(filePath, archiveContent, 'utf8'); } catch (err) {
     log(`[harness] WARNING: history archive write failed: ${err.message}`);
     return;
@@ -712,7 +812,6 @@ function appendToFile(filePath, header, content, { appendUserPromptSuffix = true
           // stack a duplicate on top of an existing one.
           if (appendUserPromptSuffix && !/##\s+User Prompt(?:\s+\([^)]+\))?\s*\n*\s*$/.test(existing)) {
             fs.appendFileSync(filePath, '\n\n---\n\n## User Prompt\n\n', 'utf8');
-            _checkHistoryLineLimit(filePath);
           }
           return;
         }
@@ -721,7 +820,6 @@ function appendToFile(filePath, header, content, { appendUserPromptSuffix = true
     const suffix = appendUserPromptSuffix ? '\n\n---\n\n## User Prompt\n\n' : '';
     const tail = suffix || '\n';
     fs.appendFileSync(filePath, `\n\n---\n\n${header}\n\n${safe}${tail}`, 'utf8');
-    _checkHistoryLineLimit(filePath);
   } finally {
     releaseFileLock(lock);
   }
@@ -804,12 +902,43 @@ function isModelIdForeignToProvider(modelId, effectiveProvider) {
   return false;
 }
 
-function resolveModel(configured, promptContent = '') {
+// Async because Step 2 awaits `ensureFreshCache` to consult the live model catalog
+// before letting a configured id reach the CLI. Step 3 makes `auto` provider-aware:
+// claude-code keeps complexity-tiered selection; other providers pick the strongest
+// available tier (heavy → medium → light) so non-claude users always get the best model.
+async function resolveModel(configured, promptContent = '') {
   const effectiveProvider = configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code');
   const providerTiers = _loadProviderTiers(effectiveProvider);
-  const modelId = resolveModelId(configured);
+  let modelId = resolveModelId(configured);
+  // Step 2 — pre-flight availability check. If the configured id isn't in the live
+  // catalog for this provider, coerce to `auto` so the auto branch below picks a
+  // valid model rather than handing an unknown id to the CLI (which would error).
+  // `stale` (cache absent/unfetchable) is treated as "unknown" → do NOT coerce,
+  // preserving prior behaviour when offline.
+  if (modelId && modelId !== 'auto') {
+    try {
+      const catalog = require('./lib/model-catalog');
+      if (typeof catalog.ensureFreshCache === 'function' && typeof catalog.isModelAvailable === 'function') {
+        await catalog.ensureFreshCache(effectiveProvider, { syncTimeoutMs: 2500 });
+        const status = catalog.isModelAvailable(effectiveProvider, modelId);
+        if (status && status.available === false && status.stale !== true) {
+          log(`Warning: configured model "${modelId}" not available for provider "${effectiveProvider}" — falling back to auto.`);
+          modelId = 'auto';
+        }
+      }
+    } catch (_) {
+      // Catalog unavailable — skip pre-flight, defer to downstream cross-provider guards.
+    }
+  }
   if (modelId === 'auto') {
-    let resolved = autoClassifyModel(promptContent, effectiveProvider);
+    // Step 3 — provider-aware auto: claude-code uses complexity tiering; every
+    // other provider gets the strongest tier available (heavy → medium → light).
+    let resolved;
+    if (effectiveProvider === 'claude-code') {
+      resolved = autoClassifyModel(promptContent, effectiveProvider);
+    } else {
+      resolved = providerTiers.heavy || providerTiers.medium || providerTiers.light;
+    }
     const downgrade = applyRateLimitDowngrade(resolved);
     resolved = downgrade.modelId;
     // Guard: never let a stale cross-provider id leak through `auto` (e.g. a `gpt-*`
@@ -1008,16 +1137,6 @@ function scrapeRateLimitHeaders(text) {
 }
 
 let _ccusageSkipped = false;
-// Set to true inside appendToFile when the history file crosses max-history-lines.
-// Consumed (reset + acted on) at the end of runPipeline so it never blocks phases.
-let _pendingHistoryCompress = false;
-function _checkHistoryLineLimit(filePath) {
-  if (_pendingHistoryCompress || filePath !== historyPath) return;
-  const maxLines = Number((config && config['max-history-lines']) || 4000);
-  try {
-    if (fs.statSync(filePath).size / 80 > maxLines) _pendingHistoryCompress = true;
-  } catch {}
-}
 function _runCcusage(args) {
   if (_ccusageSkipped) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -1301,29 +1420,78 @@ function updateTopicContext() {
 // Provider invocation layer: build payload, resolve role-specific model,
 // spawn provider CLI (claude-code / gemini / copilot / vertex), clean up.
 // =========================================================================
+// Locate the newest sibling archive file produced by `maybeAutoArchiveHistory`.
+// Sorted by the embedded ISO timestamp in the filename (NOT mtime) so file
+// touches / copies do not reorder results. Returns null when no archives exist.
+function findLatestArchive(filePath) {
+  try {
+    const ext = path.extname(filePath);
+    const dir = path.dirname(filePath);
+    const base = path.basename(filePath, ext);
+    const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const archiveRe = new RegExp(`^${escaped}\\.archive-(.+)${ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const entries = fs.readdirSync(dir)
+      .map(name => {
+        const m = archiveRe.exec(name);
+        return m ? { name, ts: m[1] } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.ts.localeCompare(a.ts));
+    return entries.length ? path.join(dir, entries[0].name) : null;
+  } catch { return null; }
+}
+
+// Shared response extractor used by both the active-history and archive-fallback
+// paths in `buildHistoryPreamble`. Keeps slice / truncate semantics identical
+// across both paths so the archive fallback never diverges from the live path.
+function extractRecentResponses(content, max = 3) {
+  const lastPromptIdx = content.lastIndexOf('\n## User Prompt');
+  const priorContent = lastPromptIdx > 0 ? content.slice(0, lastPromptIdx) : content;
+  // Body capture uses `+?` (not `*?`) so the lazy-with-multiline-`$` lookahead
+  // does not match a zero-length body immediately after the header's blank line.
+  const respRe = new RegExp(
+    `^(##\\s+(?:${ANY_RESPONSE_HEADER})[^\\n]*)\\n([\\s\\S]+?)(?=^##\\s+(?:${ANY_RESPONSE_HEADER})[^\\n]*$|$(?![\\s\\S]))`,
+    'gim'
+  );
+  const responses = [];
+  let m;
+  while ((m = respRe.exec(priorContent)) !== null) {
+    const header = m[1].trim();
+    let body = m[2].replace(/\n\n\*Model:[\s\S]*?\*\s*$/, '').trim();
+    if (body.length > 800) body = body.slice(0, 800) + '\n...[truncated]';
+    if (body) responses.push(`${header}\n\n${body}`);
+  }
+  return responses.slice(-max);
+}
+
+// Reconstructs prior-run agent responses for stateless providers. Falls back to
+// the most recent archive file when the active history is post-rotation stub
+// (clear-context marker + empty `## User Prompt`) — without this, agents
+// immediately after auto-archive report "could not read prior history".
 function buildHistoryPreamble() {
   try {
     const content = fs.readFileSync(historyPath, 'utf8');
-    const lastPromptIdx = content.lastIndexOf('\n## User Prompt');
-    if (lastPromptIdx <= 0) return '';
-    const priorContent = content.slice(0, lastPromptIdx);
-    const respRe = new RegExp(
-      `^(##\\s+(?:${ANY_RESPONSE_HEADER})[^\\n]*)\\n([\\s\\S]*?)(?=^##\\s+(?:${ANY_RESPONSE_HEADER})[^\\n]*$|$)`,
-      'gim'
-    );
-    const responses = [];
-    let m;
-    while ((m = respRe.exec(priorContent)) !== null) {
-      const header = m[1].trim();
-      let body = m[2].replace(/\n\n\*Model:[\s\S]*?\*\s*$/, '').trim();
-      if (body.length > 800) body = body.slice(0, 800) + '\n...[truncated]';
-      if (body) responses.push(`${header}\n\n${body}`);
+    let recent = extractRecentResponses(content);
+    let archiveNote = '';
+    if (!recent.length && content.includes('<!-- CLEAR CONTEXT -->')) {
+      const archivePath = findLatestArchive(historyPath);
+      if (archivePath) {
+        try {
+          const archiveContent = fs.readFileSync(archivePath, 'utf8');
+          recent = extractRecentResponses(archiveContent);
+          if (recent.length) archiveNote = ` (from archive ${path.basename(archivePath)})`;
+        } catch {}
+      }
     }
-    if (!responses.length) return '';
-    const recent = responses.slice(-3);
-    return `## Prior Session Context (reconstructed for stateless provider)\n\n${recent.join('\n\n---\n\n')}`;
+    if (!recent.length) return '';
+    return `## Prior Session Context (reconstructed for stateless provider)${archiveNote}\n\n${recent.join('\n\n---\n\n')}`;
   } catch { return ''; }
 }
+
+// Skill wiring intentionally removed pending review per planning gate
+// ("draft SKILL.md and stop for review before wiring into run-agent.js").
+// `Agent_Orchestrator/skills/history-self-lookup/SKILL.md` remains on disk
+// for review; do NOT re-introduce a call site until reviewed and approved.
 
 // ── Claude runner (streaming, stream-json) ────────────────────────────────────
 
@@ -1363,14 +1531,19 @@ async function runClaude(payload, { silent = false, label = 'harness-run-agent.j
   const heartbeatMs = config.streamingHeartbeatMs || 5000;
   const prespawnHeartbeatMs = config.prespawnHeartbeatMs || 5000;
   const cliWatchdogMs = config.cliWatchdogMs || 5000;
-  const { modelArgs, fallbackNote } = resolveModel(role ? resolveRoleModel(role) : (topicConfig && topicConfig.model) || '', payload);
+  // resolveModel is now async (awaits live catalog pre-flight in Step 2); await here
+  // so a missing model is coerced to `auto` before spawn instead of failing at the CLI.
+  const { modelArgs, fallbackNote } = await resolveModel(role ? resolveRoleModel(role) : (topicConfig && topicConfig.model) || '', payload);
   const { effortEnv, effortNote } = resolveEffort(role ? resolveRoleEffort(role) : '', payload);
   const retryCfg = configUtils.cfgRead(topicConfig, config, 'network-retry', {}) || {};
   const maxAttempts = Number(retryCfg.maxAttempts != null ? retryCfg.maxAttempts : 5) || 5;
   const backoffMs = Array.isArray(retryCfg.backoffMs) && retryCfg.backoffMs.length
     ? retryCfg.backoffMs.map(n => Number(n) || 0)
     : [1000, 4000, 10000, 30000, 60000];
-  const provider = getProvider();
+  // Use topic-config provider (same source as resolveModel) so getProvider() and
+  // resolveModel() agree when provider is set only in topic-config, not global-config.
+  const effectiveProviderId = configUtils.cfgRead(topicConfig, config, 'provider', null);
+  const provider = getProvider(effectiveProviderId);
   // Gap #8: stateless providers have no session memory — prepend prior-run agent responses.
   let finalPayload = payload;
   if (provider.capabilities && !provider.capabilities.autoResume) {
@@ -1378,7 +1551,26 @@ async function runClaude(payload, { silent = false, label = 'harness-run-agent.j
     if (preamble) finalPayload = preamble + '\n\n' + payload;
   }
   const stopReasonFallback = !!configUtils.cfgRead(topicConfig, config, 'enableStopReasonFallback', false);
-  return provider.spawn(finalPayload, { silent, label, modelArgs, effortEnv, fallbackNote, effortNote, streamOutput, heartbeatMs, prespawnHeartbeatMs, cliWatchdogMs, maxAttempts, backoffMs, stopReasonFallback });
+  const spawnOpts = { silent, label, modelArgs, effortEnv, fallbackNote, effortNote, streamOutput, heartbeatMs, prespawnHeartbeatMs, cliWatchdogMs, maxAttempts, backoffMs, stopReasonFallback };
+  try {
+    return await provider.spawn(finalPayload, spawnOpts);
+  } catch (err) {
+    // ClaudeCodeProvider handles model-unavailable fallback internally via tryModelFallback.
+    // For _adaptModule-based providers (github-copilot, gemini) retry once with the
+    // provider's medium tier so a stale/invalid model id does not permanently block runs.
+    if (err && err.modelUnavailable && provider.id !== 'claude-code') {
+      const tiers = _loadProviderTiers(provider.id);
+      const fallbackModel = tiers && tiers.medium;
+      const attempted = err.attemptedModel || (modelArgs && modelArgs[1]) || 'unknown';
+      if (fallbackModel && fallbackModel !== attempted) {
+        const note = `model "${attempted}" unavailable → fell back to ${fallbackModel}`;
+        log(`[${label}] ${note}`);
+        return provider.spawn(finalPayload, { ...spawnOpts, modelArgs: ['--model', fallbackModel], fallbackNote: note });
+      }
+      err.message = `Selected model "${attempted}" is unavailable for provider "${provider.id}". Edit topic-config.json \`models.<role>\` to pick a supported id.`;
+    }
+    throw err;
+  }
 }
 
 function buildPayload(globalRules, systemPrompt, action, userPrompt, contextSection = '') {
@@ -1437,15 +1629,11 @@ async function saveUserChanges() {
 }
 
 let _vsCodeSaveFailureLogged = false;
-// Editor-agnostic buffer flush. Reads `editor-save-all-command` (new key) first;
-// falls back to legacy `vscode-save-all-command` for back-compat. Set either to
-// empty string to disable -> pure-CLI users with no editor open are fully supported.
-// Recipe examples (see README): VS Code `code --reuse-window --command workbench.action.files.saveAll`,
-// Cursor `cursor --reuse-window --command workbench.action.files.saveAll`,
-// JetBrains `idea --line 0 <path>` n/a — set "" to disable, Sublime `subl --command "save_all"`.
-// Per-run throttle. VS Code (and other `--command`-capable editors) flash the
-// taskbar icon every time an external CLI hits
-// `--command workbench.action.files.saveAll`. The harness used to call this on
+// Editor-agnostic buffer flush. Delegates to the hardcoded keystroke flush in
+// editor-buffer-flush.js (no config knobs) — focuses the running IDE window and
+// sends its Save-All chord (auto-detected from keybindings.json, ^(k)s fallback).
+// Per-run throttle. Synthesizing the Save-All chord focuses the editor window and
+// can flash the taskbar icon. The harness used to flush on
 // every `snapshotHistorySize` -> taskbar flashed once per phase boundary. Now:
 // first call per harness run actually flushes; subsequent default-mode (non-
 // force) calls no-op. User-interaction boundaries (CLI command entry,
@@ -1456,59 +1644,89 @@ function _resetEditorFlushThrottle() { _editorFlushedThisRun = false; }
 function flushEditorBuffers(opts) {
   const force = !!(opts && opts.force);
   if (!force && _editorFlushedThisRun) return;
+  // Cross-process double-fire guard. An ancestor entry-point (editor-buffer-
+  // flush.js) may have already flushed and set HARNESS_EDITOR_FLUSHED=1 before
+  // spawning this child; without this, the child's non-force dispatch-entry
+  // flush re-fires the keystroke chord -> two focus-steals + two Ctrl+K S per
+  // hrun. Forced calls (drain / interactive boundaries) deliberately bypass the
+  // guard — the user may have typed a new prompt since the entry-point flush.
+  if (!force && process.env[FLUSHED_ENV] === '1') return;
   _editorFlushedThisRun = true;
   try {
-    // Fallback chain: new key -> legacy key -> documented default. Documented
-    // default matches the shipped `global-config.json` so deleting the key
-    // entirely doesn't silently disable buffer flush. Users who genuinely want
-    // pure-CLI / no-editor flow must SET the key to `""` explicitly.
-    const DEFAULT_EDITOR_SAVE_CMD = 'code --reuse-window --command workbench.action.files.saveAll';
-    const newVal = configUtils.cfgRead(topicConfig, config, 'editor-save-all-command', null);
-    const legacyVal = configUtils.cfgRead(topicConfig, config, 'vscode-save-all-command', null);
-    // Explicit "" means user opted out — honour it. Only fall through on null/absent.
-    const resolved = newVal != null ? newVal : (legacyVal != null ? legacyVal : DEFAULT_EDITOR_SAVE_CMD);
-    const cmd = String(resolved).trim();
-    if (!cmd) return;
-    const flushMs = Number(
-      configUtils.cfgRead(topicConfig, config, 'editor-save-flush-ms', null)
-      ?? configUtils.cfgRead(topicConfig, config, 'vscode-save-flush-ms', 200)
-    ) || 0;
-    // Tokenize w/o shell -> avoid injection from user-config string.
-    const parts = cmd.match(/(?:"[^"]*"|'[^']*'|\S+)/g) || [];
-    const argv = parts.map(p => p.replace(/^["']|["']$/g, ''));
-    if (argv.length === 0) return;
-    const [bin, ...rest] = argv;
-    // No auto flag injection -> editor-agnostic; pass user's configured command through verbatim.
-    // `windowsHide: true` -> suppress transient cmd console window that
-    // otherwise registers in the Windows taskbar and causes a flash.
-    let r = spawnSync(bin, rest, { shell: false, timeout: 3000, encoding: 'utf8', windowsHide: true });
-    // Windows: VS Code `code` ships as `code.cmd`. Only auto-retry with `.cmd` for the
-    // `code` bin (and Cursor `cursor`) so non-VS-Code editors don't get a bogus `.cmd`
-    // suffix masking the real error.
-    const isCodeLikeBin = process.platform === 'win32' && /^(code(-insiders)?|cursor)(\.cmd|\.bat|\.exe)?$/i.test(bin);
-    if (r.error && (r.error.code === 'ENOENT' || r.error.code === 'EINVAL') && isCodeLikeBin) {
-      const retryBin = /\.(cmd|bat|exe)$/i.test(bin) ? bin : `${bin}.cmd`;
-      r = spawnSync(retryBin, rest, { shell: true, timeout: 3000, encoding: 'utf8', windowsHide: true });
-    }
-    if ((r.status !== 0 || r.error) && !_vsCodeSaveFailureLogged) {
-      _vsCodeSaveFailureLogged = true;
-      // Never log to stdout/history. Stderr-only diagnostic so misconfigured editor CLI
-      // remains visible without polluting the run.
-      const errDetail = (r.error && r.error.message) || (r.stderr && r.stderr.trim()) || `exit ${r.status}`;
-      console.error(`editor-save-all-command unavailable ("${bin}": ${errDetail}) — continuing silently.`);
-    }
-    if (flushMs > 0) sleepMs(flushMs);
+    // Keystroke flush is the sole, non-configurable mechanism. All tunables
+    // (flush delay, window-match, Save-All chord) are hardcoded in
+    // editor-buffer-flush.js; the chord is auto-detected from the running IDE's
+    // keybindings.json with a ^(k)s fallback. Mark flushed after the keystroke
+    // flush so spawned children skip their redundant non-force dispatch-entry flush.
+    flushViaKeystroke();
+    process.env[FLUSHED_ENV] = '1';
   } catch (e) {
     if (!_vsCodeSaveFailureLogged) {
       _vsCodeSaveFailureLogged = true;
-      console.error(`editor-save-all-command threw: ${e.message} — continuing silently.`);
+      console.error(`editor buffer flush failed: ${e.message} — continuing silently.`);
     }
   }
 }
 // Back-compat alias -> existing call sites + tests reference old name; one source of truth.
 const saveAllVsCodeBuffers = flushEditorBuffers;
 
+// ── Regression-test skill clause (pure, testable) ─────────────────────────────
+// Extracted as a pure function (config injected, not closed-over) and defined
+// BEFORE the require-surface early-return so it is callable from tests without
+// running the imperative CLI bootstrap. Gated on `use-regression-skill` (topic
+// over global, kebab/camel via cfgRead) and INDEPENDENT of the legacy
+// `regression-tests` flag. Loads the regression-test SKILL.md, strips its
+// frontmatter, and returns a role-tailored heading so coding agents WRITE
+// behavioural tests and assessment agents REVIEW them for the diagnosed
+// anti-patterns. Missing file -> warn + '' (never throws).
+// `opts` is an optional injection seam (skillPath / fs / log) so the missing-file
+// warn-not-throw branch is behaviourally unit-testable without disturbing the real
+// SKILL.md on disk; production callers omit it and get the default ROOT path + fs.
+function resolveRegressionSkillClauseFor(topicConfigArg, configArg, role, opts = {}) {
+  const _fs = opts.fs || fs;
+  const _log = opts.log || (typeof log === 'function' ? log : null);
+  const enabled = configUtils.cfgRead(topicConfigArg, configArg, 'use-regression-skill', false);
+  if (!(enabled === true || enabled === 'true')) return '';
+  const skillPath = opts.skillPath || path.join(ROOT, 'Agent_Orchestrator/skills/regression-test/SKILL.md');
+  if (!_fs.existsSync(skillPath)) {
+    try { if (_log) _log(`Warning: use-regression-skill is enabled but skill file not found at ${skillPath} — ignoring.`); } catch {}
+    return '';
+  }
+  const body = _fs.readFileSync(skillPath, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+  if (role === 'assessment') {
+    const assessmentPreamble = `When the coding agent added or changed tests, hold them to this discipline. Reject any new test that asserts against source text, isolates code in a \`new Function\` factory, peeks at private fields, or covers a single shape where the code branches on a matrix.\n\n`;
+    return `\n\n## Regression-Test Discipline (assessment — mandatory)\n${assessmentPreamble}${body}`;
+  }
+  return `\n\n## Regression-Test Discipline (mandatory)\n${body}`;
+}
+
+// Prefix a fleet subtask error with its [task-N] label WITHOUT discarding the
+// original error object. Why: parallel fleets previously rewrapped failures in
+// `new Error(...)`, which dropped typed token props (tokenReset/tokensExhausted/
+// monthlyCapHit/cliOutput). Mutating .message in place preserves those props so
+// the runPipeline catch block can still fire the inline countdown / provider
+// fallback. Pure + hoisted so the regression test can require it directly.
+function _prefixFleetError(err, label) {
+  err.message = `[${label}] ${err.message}`;
+  return err;
+}
+
 // ── Load config ───────────────────────────────────────────────────────────────
+
+// Test-introspection surface: when this file is `require()`d (not invoked as
+// CLI entry point), expose the pure helpers `buildSystemPrompt`,
+// `resolveModel`, `resolveModelId` and short-circuit BEFORE the top-level
+// imperative arg-parsing / dispatch IIFE runs. Both helpers are
+// function-declarations defined later in this file, so JS hoisting makes them
+// safe to reference here. Added for provider-matrix.test.js parameterised
+// matrix without altering CLI semantics.
+// `_playSoundFile` additionally exported so the per-event-sound regression test
+// can assert each declared `*-sound-file` default resolves to a `.wav` path
+// (guards against config/source drift).
+if (require.main !== module) {
+  module.exports = { buildSystemPrompt, resolveModel, resolveModelId, resolveRegressionSkillClauseFor, _prefixFleetError, _playSoundFile };
+  return;
+}
 
 if (process.argv[2] === '--probe') {
   // Probe must resolve synchronously before die() calls below execute.
@@ -1539,7 +1757,15 @@ let [,, topicArg, roleArg] = process.argv;
 // CLI bootstrap: resolve topic from argv/.last-topic, load global+topic
 // configs under lock, register topic in active-topics, set history path.
 // =========================================================================
-const lastTopicPath = path.join(HARNESS, '.last-topic');
+// `.last-topic` path is overridable via env so e2e tests (which spawn this
+// binary in a child process) can redirect the pointer write to a temp file
+// instead of clobbering the user's real `.last-topic`. Same for the topics
+// dir used by the guard's fallback lookup — `AGENT_ORCH_TOPICS_DIR` lets a
+// test point both reads (existence checks) and recovery rewrites at an
+// isolated tree without touching the real harness state.
+const lastTopicPath = process.env.AGENT_ORCH_LAST_TOPIC_PATH
+  ? path.resolve(process.env.AGENT_ORCH_LAST_TOPIC_PATH)
+  : path.join(HARNESS, '.last-topic');
 
 if (topicArg && VALID_ROLES.includes(topicArg) && !roleArg) {
   roleArg = topicArg;
@@ -1547,27 +1773,87 @@ if (topicArg && VALID_ROLES.includes(topicArg) && !roleArg) {
 }
 
 if (!topicArg) {
-  if (!fs.existsSync(lastTopicPath)) {
-    die(`No topic provided and no .last-topic file found. Run with a topic first: node Agent_Orchestrator/run-agent.js <topic|id> <${VALID_ROLES.join('|')}>`);
+  // `.last-topic` recovery: cover the missing / empty / whitespace-only / stale
+  // states triggered by an interrupted previous write or a deleted topic dir.
+  // Why: a 0-byte `.last-topic` (observed after a crash mid-write) previously
+  // slipped through and dispatched with no topic. Now: list available topics
+  // from the config's topic-ids map and surface a single, actionable message.
+  const _listKnownTopics = () => {
+    try {
+      const cfg = configUtils.loadConfig(configUtils.globalConfigPath());
+      const ids = (cfg && (cfg['topic-ids'] || cfg.topicIds)) || {};
+      return [...new Set(Object.values(ids))];
+    } catch { return []; }
+  };
+  const _avail = () => {
+    const t = _listKnownTopics();
+    return t.length ? ` Available: ${t.join(', ')}.` : '';
+  };
+  // Delegate `.last-topic` resolution to the guard: validates the pointer
+  // against on-disk topic dirs and rewrites it atomically when stale/empty
+  // /missing. Prevents the harness from dispatching into a non-existent
+  // topic (e.g. an e2e stub dir that was cleaned up after a test run).
+  const { resolveLastTopic } = require('./lib/last-topic-guard');
+  let _topicsDirForGuard;
+  let _fallbackForGuard = 'claude_harness';
+  // Honor an explicit test-isolation override before consulting config so
+  // e2e tests can pin the guard to a temp tree without depending on the
+  // canonical config path. Resolved absolutely so child-process cwd drift
+  // does not matter.
+  if (process.env.AGENT_ORCH_TOPICS_DIR) {
+    _topicsDirForGuard = path.resolve(process.env.AGENT_ORCH_TOPICS_DIR);
+  } else {
+    try {
+      const _cfg = configUtils.loadConfig(configUtils.globalConfigPath());
+      _topicsDirForGuard = path.join(ROOT, configUtils.resolveTopicFilesDir(_cfg));
+      _fallbackForGuard = (_cfg && (_cfg['default-topic'] || _cfg.defaultTopic)) || _fallbackForGuard;
+    } catch {
+      // HARNESS already resolves to `.../Agent_Orchestrator`, so joining
+      // against it (not ROOT) avoids any risk of a dual `Agent_Orchestrator/
+      // Agent_Orchestrator/topic_files` prefix if ROOT is ever reconfigured
+      // to already include the harness segment.
+      _topicsDirForGuard = path.join(HARNESS, 'topic_files');
+    }
   }
-  topicArg = fs.readFileSync(lastTopicPath, 'utf8').trim();
-  if (!topicArg) die(`.last-topic is empty. Run with a topic first: hrun <topic|id>`);
+  const _resolved = resolveLastTopic({
+    topicsDir: _topicsDirForGuard,
+    lastTopicPath,
+    fallback: _fallbackForGuard,
+  });
+  if (!_resolved.topic) {
+    die(`No active topic — ${_resolved.reason || 'unresolvable'}.${_avail()}`);
+  }
+  if (_resolved.recovered) {
+    log(`Warning: .last-topic was ${_resolved.reason}; recovered to "${_resolved.topic}" and rewrote pointer.`);
+  }
+  topicArg = _resolved.topic;
   log(`Using last topic: "${topicArg}"`);
 }
 
-if (!roleArg) die(`Usage: node Agent_Orchestrator/run-agent.js <topic|id> <${VALID_ROLES.join('|')}>`);
-if (!VALID_ROLES.includes(roleArg)) die(`Role must be one of: ${VALID_ROLES.join(', ')}`);
+// `roleArg` may be absent when invoked topic-only (`hrun 3`, `hrun <topic>`, or
+// bare `hrun`). Defer pipeline resolution to dispatch, where the prompt-file
+// header and promptQueue.defaultPipeline become available. `roleExplicit`
+// records whether the CLI gave a role so a header pipeline never overrides it.
+const roleExplicit = !!roleArg;
+if (roleArg && !VALID_ROLES.includes(roleArg)) die(`Role must be one of: ${VALID_ROLES.join(', ')}`);
 
 const configPath = configUtils.globalConfigPath();
 if (!fs.existsSync(configPath)) die(`global-config.json not found at ${configPath}`);
 const config = configUtils.loadConfig(configPath);
-CONTEXT_TRUNCATION = config['context-truncation'] || config.contextTruncation || 400;
 
 const topicIds = config['topic-ids'] || config.topicIds || {};
 const topic = topicIds[topicArg] ? topicIds[topicArg] : topicArg;
 if (topic !== topicArg) log(`ID "${topicArg}" → topic "${topic}"`);
-fs.writeFileSync(lastTopicPath, topic, 'utf8');
+// Atomic `.last-topic` write: tmp + rename so a crash mid-call never leaves
+// the file truncated to 0 bytes (root cause of "empty .last-topic" recovery
+// path above). Same-FS rename is atomic; the file is always either the prior
+// value or the new value, never empty.
+{ const { atomicWriteText } = require('./lib/safe-json-write'); atomicWriteText(lastTopicPath, topic); }
 registerActiveTopic(topic);
+// Keep this agent's registry heartbeat fresh for its whole lifetime; unref'd so
+// it never holds the process open. Pairs with the TTL prune in readActiveTopics.
+const _activeTopicHb = setInterval(touchActiveTopic, ACTIVE_TOPIC_REFRESH_MS);
+if (_activeTopicHb.unref) _activeTopicHb.unref();
 
 const _knownTopics = new Set(Object.values(topicIds));
 const _topicDirCandidate = configUtils.topicDirFor(ROOT, config, topic);
@@ -1793,8 +2079,16 @@ const regressionAssessmentClause = topicConfig.regressionTests
   ? '\n\nAUDIT (regression-tests=true): The coding agent was told to add AT LEAST ONE regression test per requirement bullet in the user prompt. Count bullets in the user prompt, count new/modified test cases in the diff, and flag any missing test coverage as a BLOCKER in your assessment.\n\nAUDIT — REQUIREMENT-COMMENT MANDATE (regression-tests=true): Flag as a BLOCKER any new or modified regression test that lacks a verbatim-requirement comment block directly above it quoting the source bullet it covers.\n\nAUDIT — IMMUTABILITY (regression-tests=true): Flag as a BLOCKER any regression-test edit whose diff implies a change to the requirement documented in the comment above it without that comment being updated in lockstep.\n\nAUDIT — SILENT DELETION (regression-tests=true): Flag as a BLOCKER any deletion of a previously documented regression test (test with a verbatim-requirement comment) when the user prompt did not explicitly confirm dropping that requirement via a `## Clarifying Questions` exchange.'
   : '';
 
+// PARALLEL CLAUSE / FORMATTING-MANDATE RECONCILIATION:
+// The output formatting mandate (injected later) forces every top-level line to be
+// a `- ` bullet and forbids prose. The old wording here said "numbered item", which
+// conflicted — planners resolved the conflict by demoting the whole `## Parallel Tasks`
+// block into prose, so the literal header vanished and parsePlanningSubtasks() (fan-out.js)
+// found nothing to fan out. Reword to a `- ` bullet (agrees with the mandate;
+// splitPromptIntoTasks already accepts `[-*•]` items) and make the HEADER mandatory:
+// formatting/caveman/premise rules govern subtask CONTENT, never the header's existence.
 const parallelPlanningClause = (getMaxConcurrentAgents() > 1)
-  ? `\n\nIf the request decomposes into independent subtasks that could be implemented concurrently without conflicting, end your plan with a "## Parallel Tasks" section listing each subtask as a numbered item. Each item must be self-contained (a coding agent will see only that item plus the full original prompt). If the work is inherently sequential or too small to parallelise, omit the section.
+  ? `\n\nIf the request decomposes into independent subtasks that could be implemented concurrently without conflicting, end your plan with a "## Parallel Tasks" section listing each subtask as a single \`- \` bullet item (one bullet per subtask). Each bullet must be self-contained (a coding agent will see only that bullet plus the full original prompt) and MUST remain ONE bullet — do NOT split a subtask into sentence-per-bullet fragments, as each top-level \`- \` line is parsed as a separate task. The literal \`## Parallel Tasks\` header is REQUIRED whenever the work decomposes into independent subtasks: the output-formatting, caveman, and premise-verification rules govern the CONTENT of each subtask bullet, but NEVER justify omitting the header or demoting parallelism into prose. If the work is inherently sequential or too small to parallelise, omit the section.
 
 ### Premise Burden of Proof (mandatory for every root cause and every Parallel Task)
 
@@ -1830,15 +2124,48 @@ const cavemanClause = resolveCavemanClause();
 // from leaking into child spawn output via global context inheritance.
 const proseNeutralisationClause = '\n\nRespond in normal prose for harness role. Ignore any compressed-output or caveman directives from external CLAUDE.md files.';
 
+// Resolves the Karpathy guidelines clause from the karpathy-guidelines skill file.
+// Mirrors resolveCavemanClause(): reads topic-config first, then global-config.
+// When disabled, injects a neutralisation clause to suppress ~/.claude/CLAUDE.md
+// Karpathy section from loading into child agent calls.
+function resolveKarpathyClause() {
+  const enabled = (topicConfig.useKarpathy != null) ? !!topicConfig.useKarpathy : !!config.useKarpathy;
+  if (!enabled) return '';
+  const skillPath = path.join(ROOT, 'Agent_Orchestrator/skills/karpathy-guidelines/SKILL.md');
+  if (!fs.existsSync(skillPath)) {
+    log(`Warning: useKarpathy is enabled but skill file not found at ${skillPath} — ignoring.`);
+    return '';
+  }
+  const body = fs.readFileSync(skillPath, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+  return `\n\n# Karpathy Guidelines\n${body}`;
+}
+const karpathyClause = resolveKarpathyClause();
+// Suppress Karpathy Guidelines from ~/.claude/CLAUDE.md when the harness has not
+// enabled them — avoids paying token cost for unused guidelines every agent call.
+// Only relevant for claude-code provider; other providers have no CLAUDE.md auto-load.
+const karpathyNeutralisationClause = '\n\nIgnore Karpathy Guidelines from external CLAUDE.md files — this harness injects them directly when enabled.';
+
+// GitHub Copilot CLI auto-loads ~/.copilot/copilot-instructions.md, AGENTS.md, and
+// .github/copilot-instructions.md into every session. These can conflict with harness
+// role instructions (planning = read-only, coding = mutate, assessment = read-only).
+// This clause tells the agent that the harness system prompt takes precedence.
+const copilotInstructionsNeutralisationClause =
+  '\n\nGITHUB COPILOT CONTEXT GUARD (mandatory): The harness injects its own system instructions for this agent role. Instructions from `~/.copilot/copilot-instructions.md`, `AGENTS.md`, `.copilot/instructions.md`, or `.github/copilot-instructions.md` may be auto-loaded by the Copilot CLI. Where any such file contradicts these harness instructions, THIS system prompt takes precedence. Follow the harness role (planning/coding/assessment) strictly; ignore broader directives from those files that conflict with the role mandate.';
+
 // OUTPUT FORMATTING MANDATE — applied to ALL agent roles AFTER the caveman block so
 // bullet structure + spacing rules override caveman's "fragment OK / drop articles"
 // guidance when the two conflict. Caveman compression applies WITHIN each bullet;
 // the bullet/spacing skeleton itself is non-negotiable.
+// CARVE-OUT added: the one-sentence-per-bullet rule conflicts with the parallel-tasks
+// parser, where each top-level `- ` line under `## Parallel Tasks` is parsed as a
+// SEPARATE task. Without the exemption a multi-sentence subtask gets fragmented into
+// N bullets -> N spurious fan-out tasks. The exemption keeps each subtask one bullet.
 const outputFormattingMandateClause =
   '\n\nOUTPUT FORMATTING (MANDATORY — applies to every response you produce, including parallel subtask outputs):\n' +
   '- Format the response as a markdown bullet list. Every top-level statement must begin with `- ` (hyphen + space).\n' +
   '- Separate every bullet from the next with ONE BLANK LINE. Never let two bullets touch.\n' +
   '- Never emit a run-on paragraph. If a thought has multiple sentences, split it into multiple bullets — one sentence per bullet.\n' +
+  '- EXCEPTION: within a `## Parallel Tasks` section, each subtask MUST remain exactly ONE bullet even when it spans multiple sentences — the one-sentence-per-bullet rule does NOT apply there, because each top-level `- ` line is parsed as a separate fan-out task. Keep multi-sentence subtasks on a single bullet.\n' +
   '- Always include a space after every full stop, comma, colon, and semicolon.\n' +
   '- Code, file paths, and identifiers must be in `backticks`.\n' +
   '- Do NOT acknowledge these formatting rules in the response itself.\n' +
@@ -1862,17 +2189,88 @@ function resolveStrictAssessmentClause(role) {
 const strictAssessmentClause = resolveStrictAssessmentClause();
 const planningStrictAssessmentClause = resolveStrictAssessmentClause('planning');
 
+// ── Regression-test skill clause ──────────────────────────────────────────────
+// Mirrors resolveStrictAssessmentClause: gated on the new `use-regression-skill`
+// key (topic over global). Loads the regression-test SKILL.md body, strips its
+// frontmatter, and returns a role-tailored heading so coding agents WRITE
+// behavioural tests and assessment agents REVIEW for the diagnosed anti-patterns.
+// Independent of the legacy `regression-tests` flag (which stays intact).
+// Thin module-scope wrapper: feeds the live `topicConfig`/`config` into the pure
+// `resolveRegressionSkillClauseFor` (defined above the require-surface early-return).
+function resolveRegressionSkillClause(role) {
+  return resolveRegressionSkillClauseFor(topicConfig, config, role);
+}
+const regressionSkillClause = resolveRegressionSkillClause('coding');
+const regressionSkillAssessmentClause = resolveRegressionSkillClause('assessment');
+
+// ── Planning Citation Verification Protocol ───────────────────────────────────
+// Injected into planning prompts only. Forces the planner to Read every cited
+// file/symbol before emitting a plan, and to emit a ### Verified Citations
+// section. Prevents hallucinated premises (e.g. citing code that was removed).
+const planningCitationVerificationClause = `
+
+## Citation Verification Protocol (planner — mandatory)
+
+Before writing any plan step that references a specific file path, line number, function name, config key, or code block:
+
+1. Issue a \`Read\` tool call (or \`Grep\`) to confirm the cited symbol EXISTS in the current source. "I believe it is in X" is not evidence.
+2. If the symbol is absent from current source, DROP that root-cause premise entirely — do NOT plan a fix for it.
+3. At the very top of your plan output, include a \`### Verified Citations\` section listing every premise you verified, in the format:
+   \`path:line — "quoted snippet"\`
+   Plans that omit this section are protocol violations and must be rejected by the coding agent.
+
+Scope: every file path, function name, and config key you cite in the diagnosis or plan steps. You do NOT need to verify files listed in topic context that you are not actively diagnosing.`;
+
+// ── Planning Stale-Reference Smell List ───────────────────────────────────────
+// Built at startup from stale-symbols.json so the list is maintainable in one
+// place and referenced by both this clause and the test suite.
+// Planners that hallucinate any of these symbols are citing removed/dead code.
+const STALE_SYMBOLS_PATH = path.join(__dirname, 'stale-symbols.json');
+let planningStaleReferenceClause = '';
+try {
+  const staleData = JSON.parse(fs.readFileSync(STALE_SYMBOLS_PATH, 'utf8'));
+  const entries = (staleData.staleSymbols || [])
+    .map(s => `- \`${s.symbol}\` — ${s.description}`)
+    .join('\n');
+  if (entries) {
+    planningStaleReferenceClause = `
+
+## Known-Stale Symbol List (planner — do NOT cite these)
+
+The following symbols, config keys, and section headers have been REMOVED from the harness. If your diagnosis references any of them, it is citing dead code and the root cause is wrong. Grep for them before assuming they exist — you will find nothing.
+
+${entries}`;
+  }
+} catch (e) {
+  // Missing file is tolerable (new install, not yet created); a parse error means the
+  // JSON is malformed and the smell list would be silently absent for the entire session —
+  // that lets planners hallucinate removed symbols with no guard, so we hard-exit instead.
+  if (e.code === 'ENOENT') {
+    log(`[WARN] stale-symbols.json not found — stale-reference smell list omitted from planning prompt.`);
+  } else {
+    log(`[ERROR] stale-symbols.json is malformed — fix it before running the harness. (${e.message})`);
+    process.exit(1);
+  }
+}
+
 // ── Skills inlining (providers without native skillsRuntime) ─────────────────
 const SKILLS_INLINE_CAP = 8 * 1024; // 8 KB hard cap
 // Default skills injected when topicConfig.skills is absent and skillsRuntime=false.
-const SKILLS_INLINE_DEFAULTS = ['caveman', 'interrogate', 'strict-assessment'];
+// NOTE: `caveman` is intentionally excluded — its body is already injected unconditionally
+// via `cavemanClause` in `buildSystemPrompt` (run-agent.js:~2245) for ALL providers. Inlining
+// it here too would double-inject the caveman skill on providers lacking native skillsRuntime
+// (e.g. gemini, github-copilot) whenever `useCaveman` is on, wasting tokens.
+const SKILLS_INLINE_DEFAULTS = ['interrogate', 'strict-assessment', 'regression-test'];
 
 function buildInlinedSkillsClause() {
   let providerHasSkills = true;
   try { providerHasSkills = getProvider().capabilities.skillsRuntime; } catch { /* default true = no inline */ }
   if (providerHasSkills) return '';
   const configured = (topicConfig && topicConfig.skills) || [];
-  const skillNames = configured.length ? configured : SKILLS_INLINE_DEFAULTS;
+  // Strip `caveman` from any configured/default list: cavemanClause owns its delivery
+  // unconditionally in buildSystemPrompt, so inlining it here would double-inject. See
+  // SKILLS_INLINE_DEFAULTS note above.
+  const skillNames = (configured.length ? configured : SKILLS_INLINE_DEFAULTS).filter(n => n !== 'caveman');
   if (!skillNames.length) return '';
   const bodies = [];
   for (const name of skillNames) {
@@ -1918,7 +2316,10 @@ function getSkillsSuffix() {
     const prov = getProvider();
     if (typeof prov.registerHook !== 'function') return;
     prov.registerHook('pre', () => { try { flushEditorBuffers(); } catch {} });
-    prov.registerHook('post', () => { try { playNotificationSound(); } catch {} });
+    // Per-phase post-hook chime removed: it fired `playNotificationSound` after
+    // EVERY agent phase, producing audio spam. Sound is now restricted to the
+    // five explicit events (clarifying, queue-fetch, completion, token-limit,
+    // error) wired at their respective call-sites.
   } catch {}
 }());
 
@@ -1985,16 +2386,31 @@ function buildSystemPrompt(role, { codingNoPlanning = false } = {}) {
   if (role === 'planning') prompt += parallelPlanningClause;
   if (role === 'coding') prompt += regressionClause;
   if (role === 'assessment') prompt += regressionAssessmentClause;
+  // Opt-in regression-test skill, gated on `use-regression-skill` and independent
+  // of the legacy `regression-tests` flag above. Injects behavioural-test
+  // discipline into both the coding (write tests) and assessment (review tests) roles.
+  if (role === 'coding') prompt += regressionSkillClause;
+  if (role === 'assessment') prompt += regressionSkillAssessmentClause;
   if (useInterrogate) {
     if (role === 'planning') prompt += planningInterrogateClause;
     else if (role === 'coding' && codingNoPlanning) prompt += planningInterrogateClause;
     else prompt += downstreamInterrogateClause;
   }
   prompt += cavemanClause || proseNeutralisationClause;
+  // Karpathy guidelines (or neutralisation clause) appended unconditionally; native CLAUDE.md
+  // auto-load is suppressed by default in claude-code provider unless `provide-native-config-to-agents: true`.
+  prompt += karpathyClause || karpathyNeutralisationClause;
   // Inject formatting mandate AFTER caveman so bullet/spacing precedence wins on conflict.
   prompt += outputFormattingMandateClause;
   if (role === 'planning') prompt += planningStrictAssessmentClause;
   else if (role === 'coding' && codingNoPlanning) prompt += strictAssessmentClause;
+  // Citation Verification Protocol + stale-reference smell list: planning only.
+  // Forces the planner to Read every cited symbol before emitting a plan and
+  // surfaces known-removed symbols so the planner cannot hallucinate dead code.
+  if (role === 'planning') {
+    prompt += planningCitationVerificationClause;
+    prompt += planningStaleReferenceClause;
+  }
   if (role === 'coding') prompt += codingConfigGuardClause;
   if (role === 'assessment' || role === 'planning') prompt += assessmentConfigAttributionClause;
   if (advisorFlags[role]) prompt += claudeAdvisorClause;
@@ -2064,6 +2480,13 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
   setCurrentRole('planning');
   log(`--- Phase: planning${isRerun ? ' (re-run after reply)' : ''} ---`);
 
+  // Reset module-level `plannedSubtasks` at the START of every planning round so that
+  // a prior pipeline iteration's `## Parallel Tasks` cannot leak into this round. Without
+  // this reset, if the CURRENT plan has no parallel section, the `if (subs)` block below
+  // is skipped and the variable retains stale subtasks — causing `runCodingParallel` to
+  // fan out against subtasks the current plan never authored (see "premise rejected" bug).
+  plannedSubtasks = null;
+
   // Gap #1: read-only directive for providers without native plan-mode support.
   let _planProvCaps;
   try { _planProvCaps = getProvider().capabilities; } catch { _planProvCaps = { planMode: true }; }
@@ -2083,6 +2506,9 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
     appendAutoResumeLog(`runPlanning: historyFileSha256=${_planDbgFileSha} contextBytes=${context.length} contextHead=${JSON.stringify(context.slice(0, 200))} contextTail=${JSON.stringify(context.slice(-200))}`);
   }
   const historyRel = path.relative(ROOT, historyPath).replace(/\\/g, '/');
+  // Inject history-self-lookup skill so the planning agent fetches prior-turn
+  // context lazily via `Read` instead of receiving the parsed/truncated dump.
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
   const ctxSection = buildContextSection(topicConfig.contextFiles, historyRel, process.cwd());
   // On re-run, use a planning system prompt WITHOUT the interrogate clause and add an explicit
   // "do not re-interrogate" action directive — prevents infinite clarifying-question loops.
@@ -2092,10 +2518,17 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
   const action = isRerun
     ? `The user has already answered prior clarifying questions in the conversation below. Produce the actionable implementation plan now. Do NOT emit a "## Clarifying Questions" section — make reasonable assumptions for any residual ambiguity and document them inline in the plan.${actionVerbositySuffix()}`
     : `Produce an implementation plan for the request below.${actionVerbositySuffix()}`;
-  const payload = buildPayload(globalRules, systemPromptForRun + planReadOnlyClause + getSkillsSuffix(), action, context, ctxSection);
+  const payload = buildPayload(globalRules, historySelfLookup + systemPromptForRun + planReadOnlyClause + getSkillsSuffix(), action, context, ctxSection);
   const _snap = snapshotHistorySize();
   const { text, model, usage, costUsd, fallbackNote, effortNote, stopReason, continuations } = await runClaude(payload, { label: 'planning-agent', role: 'planning' });
   truncateHistoryIfAgentWrote(_snap, 'planning-agent');
+
+  // Verify the planner included the ### Verified Citations section mandated by
+  // planningCitationVerificationClause. Its absence means premises were not verified —
+  // log a visible warning so the user can reject the plan before dispatching to coding.
+  if (!/^###\s+Verified Citations/im.test(text)) {
+    log('[planning-guard] WARNING: planning response is missing the "### Verified Citations" section. Premises may be unverified. Reject this plan or re-run planning before proceeding to coding.');
+  }
 
   // Gap #1: diff check — warn if planning agent mutated files on a planMode=false provider.
   if (planSnapBefore !== null) {
@@ -2113,13 +2546,17 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
   appendToFile(historyPath, `## ${ROLE_HEADER.planning}`, text + footer, { appendUserPromptSuffix: !noSuffix });
   applyPlanningEffortAndModel(text);
   if (getMaxConcurrentAgents() > 1) {
-    const subs = parsePlanningSubtasks(text);
-    if (subs) {
-      plannedSubtasks = subs;
-      log(`Planning agent identified ${subs.length} parallel subtask(s) — downstream phases will fan out.`);
+    // Use the pure `nextPlannedSubtasksFromPlan` reducer so the assignment is UNCONDITIONAL.
+    // A plan without `## Parallel Tasks` yields null, which overwrites any prior round's
+    // value — structurally preventing the leak that the earlier `if (subs) plannedSubtasks = subs`
+    // guard allowed. The reducer is unit-tested in tests/planning-subtasks-reset.test.js.
+    plannedSubtasks = nextPlannedSubtasksFromPlan(text);
+    if (plannedSubtasks) {
+      log(`Planning agent identified ${plannedSubtasks.length} parallel subtask(s) — downstream phases will fan out.`);
       if (configUtils.cfgRead(topicConfig, config, 'validate-parallel-premises', false)) {
+        const before = plannedSubtasks.length;
         plannedSubtasks = await validateParallelPremises(plannedSubtasks, text);
-        log(`Premise validator approved ${plannedSubtasks.length} of ${subs.length} subtask(s).`);
+        log(`Premise validator approved ${plannedSubtasks.length} of ${before} subtask(s).`);
       }
     }
   }
@@ -2174,15 +2611,29 @@ async function runCodingFromPlan(noSuffix = false) {
   setCurrentRole('coding');
   log('--- Phase: coding (from plan) ---');
   const plan = parseLatestSection(historyPath, ROLE_HEADER.planning);
-  if (!plan) die(`No "## ${ROLE_HEADER.planning}" found in ${promptFileRel}. Run planning first.`);
-  // Defensive: if the planning response was only clarifying questions (no actionable plan body),
-  // fall back to the full conversation context so the coding agent still sees the original user prompt + reply.
-  const planIsOnlyQuestions = /^##+\s*Clarifying Questions/im.test(plan) && !/^[-*]\s/m.test(plan.replace(/^##+\s*Clarifying Questions[\s\S]*?(?=\n##+\s|$)/im, ''));
-  const taskContent = planIsOnlyQuestions
-    ? (parseConversationContext(historyPath) || plan)
-    : plan;
+  // Graceful degrade: a missing planning section (e.g. lost to a history
+  // clobber/resume race) must NOT hard-fail the coding phase. Fall back to the
+  // full conversation context so the coding agent still sees the original user
+  // prompt + reply, mirroring runCoding(). Only die() if there is no user prompt
+  // at all — nothing to code. The planIsOnlyQuestions branch (questions-only plan
+  // body) reuses the same fallback, so one taskContent resolution covers
+  // null-plan, questions-only-plan, and present-plan.
+  if (!plan) log(`[WARN] No "## ${ROLE_HEADER.planning}" found in ${promptFileRel} — falling back to coding from conversation context.`);
+  const planIsOnlyQuestions = !!plan && /^##+\s*Clarifying Questions/im.test(plan) && !/^[-*]\s/m.test(plan.replace(/^##+\s*Clarifying Questions[\s\S]*?(?=\n##+\s|$)/im, ''));
+  let taskContent;
+  if (!plan || planIsOnlyQuestions) {
+    taskContent = parseConversationContext(historyPath) || plan;
+    // Harden the no-content guard: trim before testing so an empty-but-truthy
+    // string (e.g. whitespace-only conversation context) still trips die()
+    // rather than feeding a blank task to the coding agent.
+    if (!taskContent || !String(taskContent).trim()) die(`No "## ${ROLE_HEADER.planning}" or "## User Prompt" found in ${promptFileRel}. Run planning first.`);
+  } else {
+    taskContent = plan;
+  }
+  // Inject history-self-lookup skill for the coding-from-plan main turn.
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
   const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
-  const payload = buildPayload(globalRules, systemPrompts.coding + getSkillsSuffix(), `Execute the implementation plan below. Write a concise summary of what you did.${actionVerbositySuffix()}`, taskContent, ctxSection);
+  const payload = buildPayload(globalRules, historySelfLookup + systemPrompts.coding + getSkillsSuffix(), `Execute the implementation plan below. Write a concise summary of what you did.${actionVerbositySuffix()}`, taskContent, ctxSection);
   const _snap = snapshotHistorySize();
   const { text, model, usage, costUsd, fallbackNote, effortNote, stopReason, continuations } = await runClaude(payload, { label: 'coding-agent', role: 'coding' });
   refreshHistoryPath();
@@ -2199,6 +2650,8 @@ async function runCoding(noSuffix = false) {
   log('--- Phase: coding ---');
   const context = parseConversationContext(historyPath);
   if (!context) die(`No "## User Prompt" found in ${promptFileRel}`);
+  // Inject history-self-lookup skill for the coding main turn.
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
   const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
 
   // Plan-mode two-pass gate for providers without native plan-mode support.
@@ -2229,7 +2682,7 @@ async function runCoding(noSuffix = false) {
 
   const payload = buildPayload(
     globalRules,
-    buildSystemPrompt('coding', { codingNoPlanning: true }) + getSkillsSuffix(),
+    historySelfLookup + buildSystemPrompt('coding', { codingNoPlanning: true }) + getSkillsSuffix(),
     `Execute the task below. Write a concise technical summary of what you did.${actionVerbositySuffix()}`,
     taskContent,
     ctxSection
@@ -2250,6 +2703,8 @@ async function runAssessment(noSuffix = false, { parallelTaskCount = 0 } = {}) {
   log('--- Phase: assessment ---');
   const context = parseConversationContext(historyPath) ||
     "Review the latest git diff and the coding agent's recent response for issues.";
+  // Inject history-self-lookup skill for the assessment main turn.
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
   const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
   const verbosity = topicConfig ? (topicConfig.outputVerbosity ?? 5) : 5;
   const diffLimit = verbosity >= 8 ? 16000 : verbosity >= 5 ? 8000 : 4000;
@@ -2260,7 +2715,7 @@ async function runAssessment(noSuffix = false, { parallelTaskCount = 0 } = {}) {
   const parallelHeader = buildParallelCodingBriefHeader(parallelTaskCount);
   const payload = buildPayload(
     globalRules,
-    systemPrompts.assessment + getSkillsSuffix(),
+    historySelfLookup + systemPrompts.assessment + getSkillsSuffix(),
     `Review recent code changes against the prompt below. Log all findings concisely.${actionVerbositySuffix()}`,
     parallelHeader + context + diffSection,
     ctxSection
@@ -2279,7 +2734,6 @@ async function runFleet({ kind, subtasks, taskFn }) {
   let liveCount = subtasks.length;
   const hb = setInterval(() => {
     if (liveCount <= 0) return;
-    if (_reminderInterval) return;
     const topicNames = readActiveTopics();
     const topicList = topicNames.length > 0 ? topicNames.join(', ') : topic;
     process.stdout.write(`\n[${liveCount} ${kind}-agents] working… topics: [${topicList}]\n`);
@@ -2291,7 +2745,11 @@ async function runFleet({ kind, subtasks, taskFn }) {
         const r = await taskFn(sub, i, labels[i]);
         return { ...r, label: labels[i] };
       } catch (err) {
-        throw new Error(`[${labels[i]}] ${err.message}`);
+        // Mutate+rethrow the ORIGINAL error (via _prefixFleetError) rather than
+        // wrapping in `new Error(...)`, which would drop typed token props
+        // (tokenReset/tokensExhausted/monthlyCapHit/cliOutput) and break the
+        // runPipeline countdown / provider-fallback for parallel fleets.
+        throw _prefixFleetError(err, labels[i]);
       } finally {
         liveCount--;
       }
@@ -2299,6 +2757,59 @@ async function runFleet({ kind, subtasks, taskFn }) {
   } finally {
     clearInterval(hb);
   }
+}
+
+// ── Coding-parallel bullet-format enforcement ────────────────────────────────
+// Pure detector for the mandated markdown-bullet output contract. Some fanned
+// coding agents ignore the prompt and emit one giant prose paragraph; this lets
+// the results loop deterministically catch that before appending to history.
+// Strips fenced code, markdown headers, and the trailing usage footer (exempt),
+// then flags any TOP-LEVEL line that is prose (not `- `) or an over-verbose
+// (>600 char) bullet. Indented continuations and `#` headers are allowed.
+function isBulletFormatted(text) {
+  if (!text || !text.trim()) return true;
+  // When caveman terseness is active, the prompt's verbosity complaint is also a
+  // hard requirement — a structurally-valid all-bullets response can still be far
+  // too verbose. Apply a tighter per-bullet length cap so wordy-but-bulleted
+  // output is flagged for reformatting too, not just non-bulleted prose. Cap stays
+  // lenient (600) when caveman is off so normal responses are not over-triggered.
+  const cavemanActive = !!(cavemanClause && cavemanClause.trim());
+  const maxBulletLen = cavemanActive ? 280 : 600;
+  // Remove fenced code blocks and any trailing "*Model: …*" usage footer first —
+  // both are exempt from the bullet rule.
+  let s = text.replace(/```[\s\S]*?```/g, '');
+  s = s.replace(/\n?\*Model:[\s\S]*$/i, '');
+  for (const raw of s.split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) continue;          // blank line
+    if (/^\s/.test(raw)) continue;       // indented continuation
+    if (/^#{1,6}\s/.test(line)) continue; // markdown header
+    if (/^- /.test(line)) {              // top-level bullet
+      if (line.length > maxBulletLen) return false; // over-verbose run-on bullet
+      continue;
+    }
+    return false;                        // top-level prose line
+  }
+  return true;
+}
+
+// If an agent's response already satisfies the bullet contract, return it
+// unchanged (zero token spend). Otherwise issue ONE reformat call (retried once)
+// that preserves technical content verbatim. If both attempts fail the detector,
+// keep the ORIGINAL text and warn. Footer/usage stay attributed to the original
+// coding agent because only `r.text` is replaced by the caller.
+async function enforceBulletFormat(text, label) {
+  if (isBulletFormatted(text)) return text;
+  const fmtSystem =
+    'You are a formatter. Reformat the message into the mandated markdown bullet list. Preserve ALL technical content verbatim — add nothing, drop nothing, invent no facts. Output only the reformatted message.' +
+    outputFormattingMandateClause + (cavemanClause || '');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const payload = buildPayload(globalRules, fmtSystem, 'Reformat the message below.', text, '');
+    const r = await runClaude(payload, { silent: true, label, role: 'coding' });
+    if (r && r.text && isBulletFormatted(r.text)) return r.text;
+  }
+  log(`[WARN] ${label} output not bullet-formatted after 1 reformat retry — kept original`);
+  return text;
 }
 
 async function runCodingParallel(subtasks, noSuffix = false, { noPlanning = false } = {}) {
@@ -2313,6 +2824,9 @@ async function runCodingParallel(subtasks, noSuffix = false, { noPlanning = fals
     kind: 'coding',
     subtasks: tasks,
     taskFn: async (task, i, label) => {
+      // Append caveman + output-formatting clauses as the LAST content of the
+      // per-agent payload. Both consts carry their own leading \n\n; cavemanClause
+      // is '' when disabled (no-op). Recency keeps fanned coding output bulleted/terse.
       const subPayload =
 `You are Coding Agent ${i + 1} of ${tasks.length}. Other agents run in parallel — only changes you make are yours. Focus ONLY on the subtask assigned to you below. Do not duplicate work that belongs to a sibling subtask.
 
@@ -2328,7 +2842,7 @@ Only proceed to implementation if every cited premise is confirmed by the source
 ${task}
 
 ## Full Original Prompt Context (for reference)
-${fullContext}`;
+${fullContext}${cavemanClause}${outputFormattingMandateClause}`;
       const payload = buildPayload(
         globalRules,
         codingSystemPrompt,
@@ -2346,6 +2860,11 @@ ${fullContext}`;
     if (/^##\s+Premise Rejected/im.test(r.text)) {
       process.stderr.write(`\n[WARN] Coding Agent ${i + 1} of ${tasks.length} emitted ## Premise Rejected — subtask was NOT implemented. Review history and re-plan.\n`);
     }
+    // Enforce the mandated bullet contract on the agent's prose AFTER the
+    // Premise-Rejected check (which must run on the original text) but BEFORE
+    // building the footer/appending, so non-compliant fanned output is reformatted
+    // deterministically instead of leaking a run-on paragraph into history.
+    r.text = await enforceBulletFormat(r.text, roleHeaderFor('coding', i + 1, tasks.length));
     const footer = await buildUsageFooter(r.model, r.usage, r.costUsd, r.fallbackNote, r.effortNote, { stopReason: r.stopReason, continuations: r.continuations });
     appendToFile(historyPath, `## ${roleHeaderFor('coding', i + 1, tasks.length)}`, r.text + footer, { appendUserPromptSuffix: false });
   }
@@ -2387,7 +2906,11 @@ ${siblingSummariesBlock}`;
     kind: 'assessment',
     subtasks: tasks,
     taskFn: async (task, i, label) => {
-      const body = `${parallelBrief}\n\n## Subtask Under Review (agent ${i + 1} of ${tasks.length})\n\n${task}${diffSection}`;
+      // Append caveman + output-formatting clauses as the LAST content of the
+      // per-agent assessment payload — same buried-mandate fix as runCodingParallel.
+      // Both consts self-prefix \n\n; cavemanClause is '' when disabled (no-op).
+      // Recency keeps fanned assessment output bulleted/terse instead of run-on prose.
+      const body = `${parallelBrief}\n\n## Subtask Under Review (agent ${i + 1} of ${tasks.length})\n\n${task}${diffSection}${cavemanClause}${outputFormattingMandateClause}`;
       const payload = buildPayload(
         globalRules,
         systemPrompts.assessment + getSkillsSuffix(),
@@ -2401,6 +2924,11 @@ ${siblingSummariesBlock}`;
   truncateHistoryIfAgentWrote(snapBefore, 'assessment-parallel');
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
+    // Enforce the mandated bullet contract on fanned assessment prose before the
+    // footer is built/appended — same run-on-paragraph leak existed on this sibling
+    // path as in runCodingParallel. Footer/usage stay attributed to the original
+    // assessment agent because only r.text is replaced.
+    r.text = await enforceBulletFormat(r.text, roleHeaderFor('assessment', i + 1, tasks.length));
     const footer = await buildUsageFooter(r.model, r.usage, r.costUsd, r.fallbackNote, r.effortNote, { stopReason: r.stopReason, continuations: r.continuations });
     appendToFile(historyPath, `## ${roleHeaderFor('assessment', i + 1, tasks.length)}`, r.text + footer, { appendUserPromptSuffix: false });
   }
@@ -2459,6 +2987,11 @@ ${taskFeedback[i] || '(no assessment feedback for this subtask)'}`;
   truncateHistoryIfAgentWrote(snapBefore, 'coding-remediation-parallel');
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
+    // Enforce the mandated bullet contract on fanned fix/remediation prose before
+    // the footer is built/appended — closes the same run-on-paragraph leak on this
+    // sibling path. Only r.text is replaced, so footer/usage stay attributed to the
+    // original fix agent.
+    r.text = await enforceBulletFormat(r.text, roleHeaderFor('fix', i + 1, tasks.length));
     const footer = await buildUsageFooter(r.model, r.usage, r.costUsd, r.fallbackNote, r.effortNote, { stopReason: r.stopReason, continuations: r.continuations });
     appendToFile(historyPath, `## ${roleHeaderFor('fix', i + 1, tasks.length)}`, r.text + footer, { appendUserPromptSuffix: false });
   }
@@ -2471,11 +3004,13 @@ async function runCodingAssessment(noSuffix = false, { parallelTaskCount = 0 } =
   log('--- Phase: fix (remediation) ---');
   const feedback = parseLatestSection(historyPath, ROLE_HEADER.assessment);
   if (!feedback) die(`No "## ${ROLE_HEADER.assessment}" found in ${promptFileRel}. Run assessment first.`);
+  // Inject history-self-lookup skill for the fix/remediation main turn.
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
   const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
   const parallelHeader = buildParallelCodingBriefHeader(parallelTaskCount);
   const payload = buildPayload(
     globalRules,
-    systemPrompts.coding + getSkillsSuffix(),
+    historySelfLookup + systemPrompts.coding + getSkillsSuffix(),
     `The QA assessment below identified issues. Fix them in the codebase and summarize what was corrected.${actionVerbositySuffix()}`,
     parallelHeader + feedback,
     ctxSection
@@ -2494,175 +3029,100 @@ async function runCodingAssessment(noSuffix = false, { parallelTaskCount = 0 } =
 // ── Notification sound + reminder loop ───────────────────────────────────────
 
 let _beepInFlight = false;
-let _missingSoundFileWarned = false;
 // =========================================================================
 // Clarifying-question interaction: detect "## Clarifying Questions" in the
 // latest response, prompt user (CLI or IPC broker), parse multi-line reply,
 // auto-answer where signature matches a prior identical block.
 // =========================================================================
-function playNotificationSound() {
+// Resolve a `*-sound-file` config value to an absolute `.wav` path. Bare
+// filenames (no separator) resolve under the Windows media dir so the named
+// system sounds (`tada.wav`, `Windows Notify Calendar.wav`, …) work without an
+// absolute path; absolute paths pass through; other relative paths resolve from
+// the harness root. Added so the per-event sound keys carry real `.wav` files
+// (user request) rather than synthesized-tone specs.
+function _resolveWavPath(val) {
+  if (path.isAbsolute(val)) return val;
+  if (!/[\\/]/.test(val)) return path.join('C:\\Windows\\Media', val);
+  return path.resolve(__dirname, '..', val);
+}
+
+// Shared sound-playback helper. Resolves the per-event `*-sound-file` config key
+// (falling back to `defaultWav`, the named system `.wav`) and plays it via
+// PowerShell `Media.SoundPlayer`. Beep-spec/synthesized-tone support removed:
+// every sound is now a `.wav` file and a missing/locked file fails SILENTLY (no
+// beep fallback) per the user request to drop all synthesized tones. Master
+// `play-notification-sound` gate + `_beepInFlight` latch semantics unchanged.
+function _playSoundFile(configKey, defaultWav) {
+  // Mute all five notification events for spawned child agents so only the
+  // top-level orchestrator emits sound. Two child kinds are suppressed:
+  //   1. parallel-QUEUE children — makeSpawnRunner sets AGENT_ORCH_TOPIC_DIR_OVERRIDE.
+  //   2. broker children — multi-topic `hrun 1-caf 2-f` runs each topic as a
+  //      concurrent child (parallel-broker.spawnChild); those carry the SAME env
+  //      and lack the override, so without this flag each child independently
+  //      fired its own queue-fetch/completion/clarifying/error chimes while all
+  //      were busy → the "constant beeps with stops and starts" regression. The
+  //      broker process owns the single clarifying chime; brokered children stay
+  //      silent. Parent (neither var set) remains sole emitter.
+  if (process.env.AGENT_ORCH_TOPIC_DIR_OVERRIDE || process.env.AGENT_ORCH_BROKERED_CHILD) return;
   const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
   if (enabled === false) return;
   if (_beepInFlight) return;
   try {
     if (process.platform === 'win32') {
-      // Clarifying-question chime now config-driven via `clarifying-sound-file`
-      // (default `Windows Notify Calendar.wav`); hardcoded default acts as the
-      // fallback when the key is absent. Renamed from `notification-sound-file`
-      // per per-notification configurability requirement.
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'clarifying-sound-file', 'C:\\Windows\\Media\\Windows Notify Calendar.wav') || '').trim();
+      // Config key (or its `.wav` default) drives playback; empty disables.
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, configKey, defaultWav) || '').trim();
       if (!cfgVal) return;
-      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
-      if (!fs.existsSync(resolved)) {
-        if (!_missingSoundFileWarned) {
-          _missingSoundFileWarned = true;
-          log(`clarifying-sound-file not found: ${resolved} — chime disabled until file exists.`);
-        }
-        return;
-      }
+      // Treat the value as a `.wav` file path; on spawn error clear the latch
+      // and stay silent (no synthesized-beep fallback).
       _beepInFlight = true;
-      const safePath = resolved.replace(/'/g, "''");
-      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
-      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
-      const clear = () => { _beepInFlight = false; };
-      ps.on('exit', clear);
-      ps.on('error', clear);
+      const wav = _resolveWavPath(cfgVal).replace(/'/g, "''");
+      const psCmd = `(New-Object Media.SoundPlayer '${wav}').PlaySync()`;
+      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false, windowsHide: true });
+      ps.on('exit', () => { _beepInFlight = false; });
+      ps.on('error', () => { _beepInFlight = false; });
     } else {
-      process.stdout.write('\x07');
+      // No synthesized BEL fallback off win32 — honor "no beeps at any stage";
+      // non-win32 hosts stay silent rather than emitting `\x07`.
+      return;
     }
   } catch { _beepInFlight = false; }
 }
 
-// Queue-fetch chime: distinct, innocuous tone fired when a new prompt is
-// pulled from `prompt-queue.md` for dispatch. MUST be a different sound from
-// `playNotificationSound` (which signals clarifying-question + pipeline error)
-// so the user can audibly tell "new work started" from "I need your attention".
-// Default changed to `Windows Proximity Notification.wav` per config-driven
-// sound requirement; still overridable via `queue-fetch-sound-file`. Gated
-// by the same `play-notification-sound` config switch so users keep one master
-// mute. Honours `_beepInFlight` to avoid overlapping with an active chime.
+// Event 1 — user response needed (clarifying questions). Plays the `.wav` at
+// `clarifying-sound-file`. Gated: when `auto-answer-clarifying-questions-and-submit`
+// is on, the harness answers and submits without pausing for the user, so the
+// "your input is needed" tone would be spurious — early-return to suppress it.
+function playClarifyingSound() {
+  if (configUtils.cfgRead(topicConfig, config, 'auto-answer-clarifying-questions-and-submit', false)) return;
+  _playSoundFile('clarifying-sound-file', 'Alarm01.wav');
+}
+
+// Event 2 — new prompt pulled from `prompt-queue.md`.
 function playQueueFetchSound() {
-  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
-  if (enabled === false) return;
-  if (_beepInFlight) return;
-  try {
-    if (process.platform === 'win32') {
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'queue-fetch-sound-file', 'C:\\Windows\\Media\\Windows Proximity Notification.wav') || '').trim();
-      if (!cfgVal) return;
-      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
-      if (!fs.existsSync(resolved)) {
-        if (!_missingSoundFileWarned) {
-          _missingSoundFileWarned = true;
-          log(`queue-fetch-sound-file not found: ${resolved} — queue-fetch chime disabled until file exists.`);
-        }
-        return;
-      }
-      _beepInFlight = true;
-      const safePath = resolved.replace(/'/g, "''");
-      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
-      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
-      const clear = () => { _beepInFlight = false; };
-      ps.on('exit', clear);
-      ps.on('error', clear);
-    } else {
-      // POSIX: emit two BELs spaced apart so the cadence differs from the single
-      // BEL used by `playNotificationSound`, giving a distinguishable cue.
-      process.stdout.write('\x07');
-      setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 120);
-    }
-  } catch { _beepInFlight = false; }
+  _playSoundFile('queue-fetch-sound-file', 'notify.wav');
 }
 
-// Completion chime: fired once when the final queued prompt's pipeline finishes
-// (queue empty post-drain). MUST differ from clarifying/queue-fetch tones so the
-// user hears "all work done" distinctly. Config-driven via `completion-sound-file`
-// (default `C:\Windows\Media\tada.wav`); hardcoded default is the fallback when
-// the key is absent. Shares the master `play-notification-sound` gate and the
-// `_beepInFlight` latch to avoid overlapping with an active chime.
+// Event 3 — pipeline complete and session ending.
 function playCompletionSound() {
-  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
-  if (enabled === false) return;
-  if (_beepInFlight) return;
-  try {
-    if (process.platform === 'win32') {
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'completion-sound-file', 'C:\\Windows\\Media\\tada.wav') || '').trim();
-      if (!cfgVal) return;
-      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
-      if (!fs.existsSync(resolved)) {
-        if (!_missingSoundFileWarned) {
-          _missingSoundFileWarned = true;
-          log(`completion-sound-file not found: ${resolved} — completion chime disabled until file exists.`);
-        }
-        return;
-      }
-      _beepInFlight = true;
-      const safePath = resolved.replace(/'/g, "''");
-      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
-      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
-      const clear = () => { _beepInFlight = false; };
-      ps.on('exit', clear);
-      ps.on('error', clear);
-    } else {
-      // POSIX: three quick BELs to distinguish completion from single/double BEL cues.
-      process.stdout.write('\x07');
-      setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 120);
-      setTimeout(() => { try { process.stdout.write('\x07'); } catch {} }, 240);
-    }
-  } catch { _beepInFlight = false; }
+  _playSoundFile('completion-sound-file', 'tada.wav');
 }
 
-// Token-limit interrupt chime: fired when a SIGINT/SIGHUP cancels the harness
-// mid-wait during a token-limit inline countdown, so the user hears the
-// pipeline was interrupted. Made config-driven via `token-limit-sound-file`
-// (default `Windows Notify Messaging.wav`); the hardcoded default is the
-// fallback when the key is absent. Gated by the same `play-notification-sound`
-// master switch and `_beepInFlight` latch as the sibling chimes.
+// Event 4 — token limit hit, awaiting auto-resume.
 function playTokenLimitSound() {
-  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
-  if (enabled === false) return;
-  if (_beepInFlight) return;
-  try {
-    if (process.platform === 'win32') {
-      const cfgVal = String(configUtils.cfgRead(topicConfig, config, 'token-limit-sound-file', 'C:\\Windows\\Media\\Windows Notify Messaging.wav') || '').trim();
-      if (!cfgVal) return;
-      const resolved = path.isAbsolute(cfgVal) ? cfgVal : path.join(__dirname, '..', cfgVal);
-      if (!fs.existsSync(resolved)) {
-        if (!_missingSoundFileWarned) {
-          _missingSoundFileWarned = true;
-          log(`token-limit-sound-file not found: ${resolved} — token-limit chime disabled until file exists.`);
-        }
-        return;
-      }
-      _beepInFlight = true;
-      const safePath = resolved.replace(/'/g, "''");
-      const psCmd = `(New-Object Media.SoundPlayer '${safePath}').PlaySync()`;
-      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', detached: false });
-      const clear = () => { _beepInFlight = false; };
-      ps.on('exit', clear);
-      ps.on('error', clear);
-    } else {
-      process.stdout.write('\x07');
-    }
-  } catch { _beepInFlight = false; }
+  _playSoundFile('token-limit-sound-file', 'Windows Notify Messaging.wav');
 }
 
-const MIN_REMINDER_FREQ_SEC = 1;
-let _reminderInterval = null;
+// Event 5 — error forced session to stop.
+function playErrorSound() {
+  _playSoundFile('error-sound-file', 'Windows Critical Stop.wav');
+}
+
+// Play the clarifying-question tone when the pipeline pauses for a reply. The
+// repeating reminder loop was removed (single cue only); the master
+// `play-notification-sound` gate + auto-submit gate live inside the wrappers.
 function startClarifyingQuestionWait() {
-  playNotificationSound();
-  const soundOn = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true) !== false;
-  const remindOn = configUtils.cfgRead(topicConfig, config, 'play-reminder-notifications', false) === true;
-  let freq = Number(configUtils.cfgRead(topicConfig, config, 'reminder-notification-freq', 300)) || 0;
-  if (!soundOn || !remindOn || freq <= 0) return;
-  if (freq < MIN_REMINDER_FREQ_SEC) freq = MIN_REMINDER_FREQ_SEC;
-  if (_reminderInterval) clearInterval(_reminderInterval);
-  _reminderInterval = setInterval(playNotificationSound, freq * 1000);
-  if (_reminderInterval.unref) _reminderInterval.unref();
+  playClarifyingSound();
 }
-function stopClarifyingQuestionWait() {
-  if (_reminderInterval) { clearInterval(_reminderInterval); _reminderInterval = null; }
-}
-process.on('exit', stopClarifyingQuestionWait);
 
 // ── Clarifying-questions handler ──────────────────────────────────────────────
 
@@ -3239,7 +3699,6 @@ async function handleClarifyingQuestionsIfAny() {
     reply = await promptForUserReply(questions);
   } finally {
     try { _releaseClarifier(); } catch {}
-    stopClarifyingQuestionWait();
   }
   // Commit any prompt-file edits the user made during the pause window BEFORE we
   // mutate the history file with their typed reply. Mirrors the initial-run ordering.
@@ -3325,31 +3784,30 @@ async function handleTokenLimitInline(instant, pipelineName, fromPhaseIndex) {
   const resetMs = instant.getTime();
   appendAutoResumeLog(`Inline wait started. topic="${topic}" pipeline="${pipelineName}" fromPhaseIndex=${fromPhaseIndex} resetAt=${instant.toISOString()}`);
 
-  let signalFired = false;
-  const detachedFallback = (sig) => {
-    signalFired = true;
-    // Audible interrupt cue: pipeline was cancelled mid-wait by SIGINT/SIGHUP,
-    // so play the dedicated token-limit chime to surface the interruption.
-    // Delegates to `playTokenLimitSound` (config key `token-limit-sound-file`,
-    // default `Windows Notify Messaging.wav`) so this shares the master
-    // `play-notification-sound` gate and `_beepInFlight` latch with sibling chimes.
-    try { playTokenLimitSound(); } catch {}
-    appendAutoResumeLog(`Signal ${sig} during inline wait — falling back to detached.`);
-    let providerSupports = true;
-    try { providerSupports = getProvider().capabilities.autoResume !== false; } catch {}
-    if (providerSupports) {
-      const becameEarliest = enqueueWake(topic, pipelineName, fromPhaseIndex, resetMs);
-      if (becameEarliest) scheduleSharedWake(resetMs);
-      process.stdout.write(`\nInterrupted — auto-resume scheduled as detached task. You may close this terminal.\n`);
-    } else {
-      process.stdout.write(`\nInterrupted — provider does not support detached auto-resume. Resume manually with \`hresume ${topic}\`.\n`);
-    }
+  // Signal during inline countdown: chime, log, and exit. Recovery uses
+  // `hrun <topic>-cont` because saveResumeState() writes `.state/<topic>.json`
+  // but no wake-queue entry exists for token-limit interruptions (only the
+  // network-error path enqueues). `hresume` would find nothing and refuse.
+  const onSignal = (sig) => {
+    // SIGINT chime removed: signal-handler exit during token-limit wait is a
+    // user-initiated interrupt, not one of the five allowed sound events.
+    appendAutoResumeLog(`Signal ${sig} during inline wait — exiting. Resume manually with \`hrun ${topic}-cont\`.`);
+    process.stdout.write(`\nInterrupted — resume manually with \`hrun ${topic}-cont\` after ${instant.toLocaleString()}.\n`);
+    // INVARIANT (load-bearing): this handler MUST terminate the process. The
+    // post-teardown fall-through below (~line 3575) removed its signal guard and
+    // relies on `onSignal` exiting, so reaching the resume path proves no signal
+    // fired. Softening this to a non-exiting handler reintroduces the guard bug.
     process.exit(0);
   };
-  const sighupHandler = () => detachedFallback('SIGHUP');
-  const sigintHandler = () => detachedFallback('SIGINT');
+  const sighupHandler = () => onSignal('SIGHUP');
+  const sigintHandler = () => onSignal('SIGINT');
   if (process.platform !== 'win32') process.once('SIGHUP', sighupHandler);
   process.once('SIGINT', sigintHandler);
+
+  // Token-limit chime: fired once when entering the auto-resume wait so the
+  // user is alerted that the pipeline has paused for the rate-limit reset.
+  // Distinct from completion/error/clarifying/queue-fetch tones.
+  try { playTokenLimitSound(); } catch {}
 
   try {
     await waitUntilWithCountdown(instant);
@@ -3362,7 +3820,11 @@ async function handleTokenLimitInline(instant, pipelineName, fromPhaseIndex) {
 
   if (process.platform !== 'win32') process.off('SIGHUP', sighupHandler);
   process.off('SIGINT', sigintHandler);
-  if (signalFired) return;
+  // Removed a stale early-return guard that tested an undeclared flag here; the
+  // reference threw a ReferenceError on every reset, was caught downstream as
+  // "Inline resume failed", and blocked auto-resume. The signal path (`onSignal`)
+  // already calls `process.exit(0)`, so reaching this point guarantees no signal
+  // fired; no guard flag is needed.
 
   appendAutoResumeLog(`Inline wait complete. Resuming pipeline="${pipelineName}" fromPhaseIndex=${fromPhaseIndex}`);
   log(`Session reset — resuming topic "${topic}" pipeline "${pipelineName}" from phase index ${fromPhaseIndex}.`);
@@ -3377,6 +3839,77 @@ async function handleTokenLimitInline(instant, pipelineName, fromPhaseIndex) {
 // Callers gate `emitEndOfRunLimits` and `dequeueAndTriggerNext` on `=== true`; introducing any
 // other return value would silently stop queue drain. If a new "paused" path is added, return
 // `false` (not a new sentinel) so the existing gates keep working.
+// ── Cross-provider token-exhaustion fallback ────────────────────────────────
+// When the active provider exhausts its token/quota window, walk the user-
+// configured `fallback-providers` chain instead of waiting for the reset. The
+// next provider id is persisted into topic-config.json (`provider` + a
+// `fallback-state` object recording tried providers) so an `hresume` after a
+// crash continues on the swapped provider rather than reverting to the
+// original. Clearing of `fallback-state` happens on pipeline success.
+
+function _loadFallbackChain() {
+  const chain = configUtils.cfgRead(topicConfig, config, 'fallback-providers', null);
+  if (!Array.isArray(chain)) return [];
+  return chain.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
+}
+
+function _getTriedProviders() {
+  const fs2 = topicConfig && topicConfig['fallback-state'] && topicConfig['fallback-state'].tried;
+  return Array.isArray(fs2) ? fs2.slice() : [];
+}
+
+function _persistFallbackSwap(newProviderId, triedList) {
+  try {
+    const fresh = configUtils.loadConfig(topicConfigPath);
+    fresh.provider = newProviderId;
+    fresh['fallback-state'] = { tried: triedList, swappedAt: new Date().toISOString(), original: (fresh['fallback-state'] && fresh['fallback-state'].original) || (topicConfig && topicConfig['fallback-state'] && topicConfig['fallback-state'].original) || (triedList[0] || null) };
+    configUtils.writeConfig(topicConfigPath, fresh);
+    topicConfig = fresh;
+  } catch (e) {
+    try { appendAutoResumeLog(`fallback-state persist failed: ${e.message}`); } catch {}
+  }
+}
+
+function _clearFallbackState() {
+  try {
+    if (!topicConfig || !topicConfig['fallback-state']) return;
+    const fresh = configUtils.loadConfig(topicConfigPath);
+    delete fresh['fallback-state'];
+    configUtils.writeConfig(topicConfigPath, fresh);
+    topicConfig = fresh;
+  } catch {}
+}
+
+// Attempt to swap to the next un-tried provider in the fallback chain.
+// Returns `true` if a swap+rerun was triggered (caller should return false from
+// the pipeline). Returns `false` if no usable fallback remained.
+async function _tryProviderFallback(err, pipelineName, phaseIndex) {
+  const chain = _loadFallbackChain();
+  if (!chain.length) return false;
+  let currentId = null;
+  try { currentId = getProvider().id; } catch {}
+  const tried = _getTriedProviders();
+  if (currentId && !tried.includes(currentId)) tried.push(currentId);
+  const remaining = chain.filter(id => !tried.includes(id));
+  if (!remaining.length) {
+    const instant = err && err.tokenReset ? nextResetInstant(err.tokenReset) : null;
+    const resetMsg = instant ? ` Earliest token reset: ${instant.toLocaleString()}.` : '';
+    const banner = `\n⛔ Auto-resume not possible on [${tried.join(', ')}].${resetMsg}\n`;
+    process.stdout.write(banner);
+    try { log(banner.trim()); } catch {}
+    return { swapped: false, exhausted: true };
+  }
+  const nextId = remaining[0];
+  _persistFallbackSwap(nextId, tried);
+  const banner = `\nTokens have run out on ${currentId || 'current provider'}. Falling back to ${nextId}.\n`;
+  process.stdout.write(banner);
+  try { log(banner.trim()); } catch {}
+  // Re-enter the pipeline at the same phase — getProvider() now reads the
+  // newly-persisted `provider` field from topicConfig and spawns the next CLI.
+  await runPipeline(pipelineName, phaseIndex);
+  return { swapped: true, exhausted: false };
+}
+
 async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = false } = {}) {
   const phases = PIPELINES[pipelineName];
   if (!phases) die(`Unknown pipeline "${pipelineName}"`);
@@ -3384,6 +3917,12 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
   let subsFromPrompt = (!hasPlanning) ? resolveSubtasksFromPrompt() : null;
 
   if (phases.length > 1) log(`=== Pipeline: ${phases.join(' → ')} ===`);
+
+  // Belt-and-braces reset of module-level `plannedSubtasks` at the top of every pipeline run.
+  // `runPlanning` already resets it, but a resume that skips planning (`startIndex > 0`) or a
+  // pipeline that omits planning entirely would otherwise inherit a stale value from a prior
+  // `runPipeline` invocation in the same Node process.
+  plannedSubtasks = null;
 
   // Strict in-order phase execution: index ascends, no re-ordering. The PIPELINES table is the
   // single source of truth so a `caf` run is always coding → assessment → fix. (Prior-turn
@@ -3401,6 +3940,33 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
       const autoResume = (configUtils.cfgRead(topicConfig, config, 'auto-resume-on-token-limit', true) !== false);
       let providerAutoResume = true;
       try { providerAutoResume = getProvider().capabilities.autoResume !== false; } catch {}
+      // Cross-provider fallback hook: classify non-Claude quota errors too so the
+      // chain triggers regardless of whether `err.tokenReset` was parsed. The
+      // swap takes precedence over the wait-for-reset / monthly-cap paths since
+      // the user opted into fallback by configuring `fallback-providers`.
+      if (!err.tokensExhausted) {
+        try {
+          const cls = classifyTokensExhausted(err);
+          if (cls.kind === 'tokens-exhausted') err.tokensExhausted = true;
+        } catch {}
+      }
+      if (err.tokensExhausted || err.tokenReset || err.monthlyCapHit) {
+        try {
+          const fb = await _tryProviderFallback(err, pipelineName, i);
+          if (fb && fb.swapped) return false;
+          if (fb && fb.exhausted) {
+            // Whole chain tried — skip the auto-resume scheduling that follows
+            // and exit cleanly so the user sees the printed "not possible" line
+            // as the final word.
+            clearResumeState(topic);
+            _clearFallbackState();
+            process.exit(2);
+            return false;
+          }
+        } catch (fbErr) {
+          try { appendAutoResumeLog(`provider-fallback attempt failed: ${fbErr.message}`); } catch {}
+        }
+      }
       if (err.monthlyCapHit) {
         clearResumeState(topic);
         const banner = `\n⛔ Monthly spend cap hit. Run \`hresume\` after billing reset.\n`;
@@ -3421,23 +3987,21 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
       }
       const instant = err.tokenReset ? nextResetInstant(err.tokenReset) : null;
       if (err.tokenReset && autoResume && providerAutoResume && instant) {
-        log(`Token limit hit — auto-resume triggered for ${instant.toString()} (topic "${topic}", phase "${phaseName}").`);
-        const useDetached = resolveUseDetachedAutoResume();
-        if (!useDetached) {
-          try {
-            await handleTokenLimitInline(instant, pipelineName, i);
-            return false;
-          } catch (inlineErr) {
-            log(`Inline resume failed (${inlineErr.message}) — falling back to detached schedule.`);
-            appendAutoResumeLog(`Inline resume failed, falling back to detached.`, inlineErr);
-          }
-        }
-        // Detached path: force-write state so 'continue' finds the right phase even if skipStateWrites=true.
+        // Inline-only auto-resume: block with countdown until the reset instant,
+        // then re-enter runPipeline at the failed phase.
+        log(`Token limit hit — inline auto-resume triggered for ${instant.toString()} (topic "${topic}", phase "${phaseName}").`);
         saveResumeState(topic, { pipeline: pipelineName, phaseIndex: i, phase: phaseName, ts: new Date().toISOString() });
-        const becameEarliest = enqueueWake(topic, pipelineName, i, instant.getTime());
-        if (becameEarliest) scheduleSharedWake(instant.getTime());
-        else log(`Wake queue already has an earlier job — skipping schtasks/at registration.`);
-        process.stdout.write(`\nYou hit the session/token limit. The harness has scheduled a detached task to resume topic "${topic}" at ${instant.toLocaleString()}. You may close this CLI.\n`);
+        try {
+          await handleTokenLimitInline(instant, pipelineName, i);
+        } catch (inlineErr) {
+          // Inline-failure recovery: use `hrun <topic>-cont` for the same reason
+          // as the signal-path message — the token-limit branch saves
+          // `.state/<topic>.json` but never enqueues a wake-queue job, so
+          // `hresume` would find no matching topic and bail.
+          log(`Inline resume failed (${inlineErr.message}) — resume manually with \`hrun ${topic}-cont\`.`);
+          appendAutoResumeLog(`Inline resume failed.`, inlineErr);
+          process.stdout.write(`\nToken limit hit and inline resume failed. Resume manually with \`hrun ${topic}-cont\` after ${instant.toLocaleString()}.\n`);
+        }
         return false;
       }
       if (err.tokenReset && autoResume && !providerAutoResume) {
@@ -3448,7 +4012,20 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
       } else {
         clearResumeState(topic);
       }
-      die(`Phase ${i + 1} (${phaseName}) failed: ${err.message}`);
+      // Context-window overflow: surface an actionable, non-cryptic message
+      // instead of the generic "Phase N (X) failed: Claude exited with code 1".
+      // The Provider tagged err.contextLimitHit when stderr/stdout carried a
+      // prompt-too-long / context-length / invalid_request_error+tokens signature.
+      // Run the same auto-restore cleanup that the die() path triggers via process.on('exit').
+      if (err.contextLimitHit) {
+        const mdl = err.attemptedModel || 'unknown';
+        const friendly = `Token limit reached for model ${mdl}; consider switching model or clearing memory.`;
+        log(friendly);
+        process.stdout.write(`\n⛔ ${friendly}\n  Phase: ${phaseName} (topic "${topic}")\n  Edit topic-config.json \`models.${phaseName}\` to a larger-context model, or run \`hclear-memory\` to shrink the prompt, then re-run.\n`);
+        process.exit(2);
+        return false;
+      }
+      die(`Phase ${i + 1} (${phaseName}) failed: ${err.message}${err.cliOutput ? `\n--- claude output ---\n${err.cliOutput}\n---` : ''}`);
     }
     if (phaseName === 'planning' && getMaxConcurrentAgents() > 1) {
       // plannedSubtasks already set inside runPlanning
@@ -3457,7 +4034,10 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
     // before the pipeline exits. Final-phase pause still beeps + waits via the reminder loop.
     {
       const paused = await handleClarifyingQuestionsIfAny();
-      if (paused && (phaseName === 'planning' || phaseName === 'coding')) {
+      // Re-run any phase that asked clarifying questions once a reply arrives —
+      // including 'fix' (remediation coding), which was previously excluded and
+      // caused the harness to silently skip the fix after an auto-reply.
+      if (paused && (phaseName === 'planning' || phaseName === 'coding' || phaseName === 'fix')) {
         // Persist a marker BEFORE the first await so token-exhaustion during the rerun
         // doesn't silently drop the fact that a reply was captured.  On resume (hresume or
         // inline countdown) the reply is already in the history file; this marker tells the
@@ -3485,6 +4065,15 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
           // fresh run sees both replies in-context. Do NOT persist an `isRerun` flag without
           // also designing recovery for it.
           await handleClarifyingQuestionsIfAny();
+          // For the 'fix' phase (last in all pipelines), also run assessment when the
+          // pipeline originally included one — satisfies "full response includes assessment
+          // if requested by the initial run command." For planning/coding, the for-loop
+          // naturally continues to downstream phases; fix has no loop tail so we append
+          // assessment explicitly.
+          if (phaseName === 'fix' && phases.includes('assessment')) {
+            log('Running assessment of the re-run fix output (pipeline included assessment).');
+            await runPhase('assessment', { isFinal: true, hasPlanning, subsFromPrompt });
+          }
         } catch (rerunErr) {
           const errClass = classifyTokenError(rerunErr);
           if (errClass.kind === 'monthly' || rerunErr.monthlyCapHit) {
@@ -3500,21 +4089,16 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
           if (rerunErr.tokenReset && autoResume && providerAutoResume && rerunInstant) {
             log(`Token limit hit during clarifier rerun (phase "${phaseName}") — waiting for reset then re-dispatching. Reply is saved.`);
             appendAutoResumeLog(`clarifier rerun token-limit: topic="${topic}" phase="${phaseName}" phaseIndex=${i} resetAt=${rerunInstant.toISOString()}`);
+            // Inline-only path: block with countdown then re-enter runPipeline.
+            saveResumeState(topic, { pipeline: pipelineName, phaseIndex: i, phase: phaseName, ts: new Date().toISOString() });
             try {
-              // handleTokenLimitInline calls runPipeline(pipelineName, i) after the countdown.
-              // That re-invocation will hit handleClarifyingQuestionsIfAny, find the reply
-              // already in the history file, and dispatch the rerun naturally.
               await handleTokenLimitInline(rerunInstant, pipelineName, i);
-              return false;
             } catch (inlineErr) {
-              log(`Inline resume failed during clarifier rerun (${inlineErr.message}) — falling back to detached.`);
+              log(`Inline resume failed during clarifier rerun (${inlineErr.message}) — resume manually with \`hresume ${topic}\`.`);
               appendAutoResumeLog(`clarifier rerun inline resume failed: ${inlineErr.message}`);
-              saveResumeState(topic, { pipeline: pipelineName, phaseIndex: i, phase: phaseName, ts: new Date().toISOString() });
-              const becameEarliest = enqueueWake(topic, pipelineName, i, rerunInstant.getTime());
-              if (becameEarliest) scheduleSharedWake(rerunInstant.getTime());
-              process.stdout.write(`\nToken limit during clarifier rerun. Scheduled resume at ${rerunInstant.toLocaleString()}. Reply is saved.\n`);
-              return false;
+              process.stdout.write(`\nToken limit during clarifier rerun and inline resume failed. Resume manually with \`hresume ${topic}\` after ${rerunInstant.toLocaleString()}. Reply is saved.\n`);
             }
+            return false;
           }
           // Not a classifiable token error — propagate to outer handler.
           throw rerunErr;
@@ -3540,10 +4124,10 @@ async function runPipeline(pipelineName, startIndex = 0, { skipStateWrites = fal
     await stageAndCommitChanges();
   }
   clearResumeState(topic);
-  if (_pendingHistoryCompress) {
-    _pendingHistoryCompress = false;
-    _enqueueHistoryCompress();
-  }
+  // Wipe fallback bookkeeping once the pipeline completes — leftover `tried`
+  // entries would otherwise leak into the next prompt and skip providers the
+  // user has since restored quota on.
+  _clearFallbackState();
   return true;
 }
 
@@ -3581,21 +4165,6 @@ const promptQueue = require('./prompt-queue');
 // refactor to `const`/arrow without first moving the definition to the top of
 // the module.
 function topicDirPath() { return path.dirname(historyPath); }
-
-function _enqueueHistoryCompress() {
-  try {
-    const td = topicDirPath();
-    const { blocks } = promptQueue.parseQueue(td);
-    if (blocks.length > 0 && String(blocks[0].body || '').trim() === '__compress-history__') {
-      log('[harness] Compress task already at queue head — skipping duplicate enqueue.');
-      return;
-    }
-    const ok = promptQueue.prependHead(td, '__compress-history__');
-    if (ok) log(`[harness] History file exceeded max-history-lines — compress task prepended to prompt queue for topic "${topic}".`);
-  } catch (e) {
-    log(`[harness] Failed to enqueue compress task: ${e.message}`);
-  }
-}
 
 // Map shorthand -> pipeline key understood by runPipeline / role dispatch.
 function resolvePipelineFromShorthand(shorthand) {
@@ -3648,6 +4217,54 @@ function injectQueuedPromptIntoHistory(body) {
   } finally { releaseFileLock(lock); }
 }
 
+// Parse the latest `## User Prompt` block for an optional per-prompt header
+// (pipeline / model / provider — SAME grammar as the prompt-queue, delegated to
+// `promptQueue.parsePromptFileHeader`). When a header is recognised, physically
+// strip the header line from the block in-place so downstream agents never read
+// it as prompt content. Returns `{ pipeline, model, provider }` (any field may
+// be null) or null when no header is present. Best-effort: returns null on any
+// read/parse error so a malformed first line just runs the prompt verbatim.
+function applyPromptFileHeader(filePath) {
+  let content;
+  try { content = fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+  // Anchor to the LAST `## User Prompt` block (negative lookahead forbids a later
+  // one) — mirrors `fillEmptyPromptFromQueueOrInteractive`'s trailing-prompt regex.
+  const re = /(\n+(?:---\s*\n+)?)## User Prompt[^\n]*\n((?:(?!\n## User Prompt)[\s\S])*)$/;
+  const m = re.exec(content);
+  if (!m) return null;
+  const body = m[2] || '';
+  let parsed;
+  try { parsed = promptQueue.parsePromptFileHeader(body); } catch { return null; }
+  if (!parsed || (!parsed.pipeline && !parsed.model && !parsed.provider)) return null;
+  // Header recognised: rewrite the block with the header line removed (under
+  // lock) so the agent sees only real prompt content. `parsed.body` is the body
+  // with the header line already stripped by `parseBlock`.
+  if (parsed.body !== body) {
+    const bodyStart = m.index + m[0].length - body.length;
+    const next = content.slice(0, bodyStart) + parsed.body + content.slice(bodyStart + body.length);
+    const lock = acquireFileLock(filePath);
+    try { fs.writeFileSync(filePath, next, 'utf8'); } finally { releaseFileLock(lock); }
+  }
+  return { pipeline: parsed.pipeline, model: parsed.model, provider: parsed.provider };
+}
+
+// Drain-time forced editor flush. The two queue-drain entry points re-read the
+// queue file from disk; if the user just typed a prompt into an unsaved editor
+// buffer, the read sees a stale (often first-line-only) version and dequeues a
+// truncated block. Force a save-all (bypassing the once-per-run throttle via
+// `_resetEditorFlushThrottle`), then settle for the hardcoded 200ms so the
+// write lands before any `parseQueue`/`dequeueFirstUnheld`. The `{force:true}`
+// call deliberately bypasses both the per-run throttle and the
+// `HARNESS_EDITOR_FLUSHED` cross-process guard (the user may have typed a new
+// prompt since the entry-point flush), so we do NOT clear that env flag —
+// leaving it set still suppresses the redundant non-force child flush.
+function _drainFlushEditorBuffers() {
+  _resetEditorFlushThrottle();
+  flushEditorBuffers({ force: true });
+  // Settle delay is hardcoded (200ms) — flush timing is no longer configurable.
+  sleepMs(200);
+}
+
 // When the latest `## User Prompt` block is empty, pull the first unheld block
 // from the queue and inject its body in place of the empty prompt. Pipeline
 // from the invoked `hrun` always wins — we use ONLY the queued block's body,
@@ -3655,6 +4272,9 @@ function injectQueuedPromptIntoHistory(body) {
 // to an interactive multi-line prompt (no opt-out). Always-on; runs once at
 // dispatch entry before `stripTrailingUserPrompt`.
 async function fillEmptyPromptFromQueueOrInteractive() {
+  // Persist unsaved editor buffers before the first queue read so a half-saved
+  // prompt block is not dequeued in its truncated form.
+  _drainFlushEditorBuffers();
   let content;
   try { content = fs.readFileSync(historyPath, 'utf8'); } catch { return; }
   // Trailing `## User Prompt[...]` placeholder. Header line + body to EOF.
@@ -3672,6 +4292,22 @@ async function fillEmptyPromptFromQueueOrInteractive() {
   if (bodyStripped.length > 0) return; // non-empty trailing prompt — keep user content
   const td = topicDirPath();
   const qPath = require('path').join(td, 'prompt-queue.md');
+  // Forensic queue-file-stat — mirrors `dequeueAndTriggerNext` so a freshly
+  // written-but-empty file can be told apart from a stale/unchanged one when
+  // diagnosing missed dequeues.
+  try {
+    const crypto = require('crypto');
+    if (fs.existsSync(qPath)) {
+      const st = fs.statSync(qPath);
+      const head = fs.readFileSync(qPath, 'utf8').slice(0, 200);
+      const sha = crypto.createHash('sha1').update(head).digest('hex').slice(0, 12);
+      appendAutoResumeLog(`fillEmptyPrompt: queue-file-stat path="${qPath}" mtimeMs=${st.mtimeMs} mtimeIso=${new Date(st.mtimeMs).toISOString()} size=${st.size} head200Sha1=${sha}`);
+    } else {
+      appendAutoResumeLog(`fillEmptyPrompt: queue-file-stat path="${qPath}" missing`);
+    }
+  } catch (statErr) {
+    appendAutoResumeLog(`fillEmptyPrompt: queue-file-stat failed: ${statErr.message}`);
+  }
   let blocksLen = 0, unheldCount = 0;
   try {
     const { blocks } = promptQueue.parseQueue(td);
@@ -3690,9 +4326,33 @@ async function fillEmptyPromptFromQueueOrInteractive() {
     injectQueuedPromptIntoHistory(picked.block.body);
     return;
   }
+  // One-shot retry — VS Code's async write may not have landed within the
+  // initial 400 ms flush window. Sleep `fill-prompt-retry-flush-ms` (0 = off)
+  // and re-read the queue once before falling back to the interactive prompt.
+  const retryMs = Number(configUtils.cfgRead(topicConfig, config, 'fill-prompt-retry-flush-ms', 500)) || 0;
+  let retry = null;
+  if (retryMs > 0) {
+    appendAutoResumeLog(`fillEmptyPrompt: first dequeue empty — retrying after ${retryMs}ms flush wait`);
+    sleepMs(retryMs);
+    // Re-drain editor buffers before the second read — cheap insurance for the
+    // case where VS Code held the write in an unsaved buffer past the first drain.
+    _drainFlushEditorBuffers();
+    retry = promptQueue.dequeueFirstUnheld(td, { defaultPipeline: defaultPipelineShort, log });
+    appendAutoResumeLog(`dequeueFirstUnheld[fillEmptyPrompt-retry]: topic="${topic}" hasBlock=${!!(retry && retry.block)} warning="${retry && retry.warning || ''}" remaining=${retry && retry.remainingCount} skippedHeld=${retry && retry.skippedHeld || 0}`);
+    if (retry && retry.block) {
+      if (retry.skippedHeld) log(`prompt-queue: skipped ${retry.skippedHeld} held block(s) while searching for an unheld prompt.`);
+      log(`prompt-queue: queue head arrived after retry — injecting body (${retry.remainingCount} block(s) remain). Pipeline from invocation wins; queued header ignored.`);
+      appendAutoResumeLog(`dequeueFirstUnheld[fillEmptyPrompt-retry]: injecting popped body into history`);
+      injectQueuedPromptIntoHistory(retry.block.body);
+      return;
+    }
+  }
   // Queue empty or all blocks held — prompt user interactively.
-  const reason = picked && picked.warning === 'all-held'
-    ? `all ${picked.remainingCount} queued block(s) are marked (hold)`
+  // Use the LATEST non-null dequeue result (retry wins) so the printed reason
+  // reflects the final state, not the stale first attempt.
+  const last = retry || picked;
+  const reason = last && last.warning === 'all-held'
+    ? `all ${last.remainingCount} queued block(s) are marked (hold)`
     : 'queue is empty';
   process.stdout.write(
 `\n ─────────────────────────────────────────────────────────
@@ -3735,16 +4395,17 @@ async function _maybeRunParallelQueueBatch({ defaultPipelineShort }) {
   // Drains every non-`(hold)` block in ONE parallel batch via parallel-batch
   // orchestrator. `(hold)` blocks stay in the queue and resume serial drain.
   const enabled = configUtils.cfgRead(topicConfig, config, 'run-queue-in-parallel', false);
-  // Parallel runner is currently a STUB that writes drained blocks into
-  // `.parallel/<slug>.md` and never re-injects them — bodies vanish from
-  // the main history. Hard-gate behind `parallel-runner-implemented` so the
-  // stub cannot consume queued prompts until the real spawn lands.
-  const runnerImpl = configUtils.cfgRead(topicConfig, config, 'parallel-runner-implemented', false);
+  // The real runner now spawns child `run-agent.js` processes (see
+  // parallel-batch.makeSpawnRunner) and re-injects each child's output via the
+  // FIFO staging splice — no more prompt loss. `parallel-runner-implemented`
+  // is retained as an explicit kill-switch (default true): set it false to fall
+  // back to the sequential drain without disabling `run-queue-in-parallel`.
+  const runnerImpl = configUtils.cfgRead(topicConfig, config, 'parallel-runner-implemented', true);
   appendAutoResumeLog(`_maybeRunParallelQueueBatch: topic="${topic}" enabled=${enabled} runnerImpl=${runnerImpl}`);
   if (!enabled) return false;
   if (!runnerImpl) {
-    appendAutoResumeLog(`_maybeRunParallelQueueBatch: STUB-GUARD active — run-queue-in-parallel=true but parallel-runner-implemented=false; refusing to drain to avoid losing prompts.`);
-    log(`prompt-queue: run-queue-in-parallel=true but parallel-runner-implemented=false — skipping parallel batch (stub would eat prompts). Falling through to sequential drain.`);
+    appendAutoResumeLog(`_maybeRunParallelQueueBatch: STUB-GUARD active (kill-switch) — run-queue-in-parallel=true but parallel-runner-implemented=false; falling back to sequential drain.`);
+    log(`prompt-queue: run-queue-in-parallel=true but parallel-runner-implemented=false — kill-switch on, using sequential drain.`);
     return false;
   }
   const td = topicDirPath();
@@ -3771,9 +4432,19 @@ async function _maybeRunParallelQueueBatch({ defaultPipelineShort }) {
   // and `_beepInFlight` would suppress them anyway. Uses the innocuous
   // queue-fetch tone, distinct from the clarifying/error chime.
   try { playQueueFetchSound(); appendAutoResumeLog(`prompt-queue: queue-fetch chime fired (parallel batch, drained=${drained.length})`); } catch {}
-  appendAutoResumeLog(`_maybeRunParallelQueueBatch: drained=${drained.length} — stub runner will absorb bodies; READ THIS IF PROMPTS WENT MISSING`);
+  // Trace post-implementation: the real spawn runner (makeSpawnRunner) drains
+  // each block via a child process and re-injects its output through the FIFO
+  // staging splice. Updated from the former "stub runner" wording, which is now
+  // inaccurate and would mislead anyone debugging a missing-prompt report.
+  appendAutoResumeLog(`_maybeRunParallelQueueBatch: drained=${drained.length} — real spawn runner will dispatch + re-inject bodies via FIFO splice`);
   log(`prompt-queue: run-queue-in-parallel=true — dispatching ${drained.length} block(s) in parallel (cap=${maxParallel}, worktree=${useWorktree}, combined-commit=${stageAndCommit}).`);
   const ts = new Date().toISOString();
+  // Slots dir scoped under the harness root so the cross-process
+  // `max-parallel-agents` cap is shared across every topic of THIS harness.
+  const slotsDir = path.join(ROOT, '.state', 'parallel-slots');
+  // Real runner: spawn a child `run-agent.js` per block against an ephemeral
+  // sub-topic dir (AGENT_ORCH_TOPIC_DIR_OVERRIDE) and splice its output back —
+  // replaces the former stub that silently ate prompts (QA FAIL #1).
   await parallelBatch.runParallelQueueBatch({
     topicDir: td,
     topicName: topic,
@@ -3784,23 +4455,23 @@ async function _maybeRunParallelQueueBatch({ defaultPipelineShort }) {
     useWorktree,
     repoRoot,
     timestamp: ts,
+    slotsDir,
     log,
-    runner: async ({ entry, subDir }) => {
-      // Stub runner — actual sub-`run-agent.js` spawn lives behind a feature
-      // flag pending QA gap-5 worktree integration tests. For now we record
-      // the prompt body and pipeline shorthand into the sub-topic dir so the
-      // orchestrator's consolidation has something to splice; the in-process
-      // pipeline will replay these serially on resume.
-      const promptFile = path.join(subDir, `${entry.slug}.md`);
-      try { fs.mkdirSync(subDir, { recursive: true }); } catch {}
-      fs.writeFileSync(promptFile, `## User Prompt\n\n${entry.body || ''}\n`);
-      return `(parallel agent stub for "${entry.slug}" — see ${promptFile})`;
-    },
+    runner: parallelBatch.makeSpawnRunner({
+      execPath: process.execPath,
+      runAgentPath: __filename,
+      pipelineShort: defaultPipelineShort,
+      parentTopicConfigPath: topicConfigPath,
+      log,
+    }),
   });
   return true;
 }
 
 async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
+  // Persist unsaved editor buffers before the first queue re-read so the drain
+  // dequeues fully-saved blocks, not a stale first-line-only version.
+  _drainFlushEditorBuffers();
   // Loop-drain remaining queued blocks in-process. Recursion previously produced
   // N+1 `emitEndOfRunLimits` summaries (once per recursive drain + once at the
   // outer top-level callsite); the loop runs `runPipeline` repeatedly within a
@@ -3875,44 +4546,36 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
     if (!popped.block) { appendAutoResumeLog(`dequeueAndTriggerNext: early-return branch=unknown-shorthand warning="${popped.warning}"`); return; } // unknown-shorthand warning — queue untouched
     const { block, remainingCount, defaultedPipeline, skippedHeld } = popped;
     if (skippedHeld) log(`prompt-queue: skipped ${skippedHeld} held block(s), dequeued unheld block (pipeline=${block.pipeline}, remaining=${remainingCount}).`);
-    // System directive: compress-history — call compressTopic directly, skip pipeline dispatch.
-    if (String(block.body || '').trim() === '__compress-history__') {
-      log(`prompt-queue: processing system directive compress-history for topic "${topic}".`);
-      try {
-        const { compressTopic } = require('./compress-memory.js');
-        await compressTopic(topic);
-        log(`prompt-queue: compress-history complete for topic "${topic}".`);
-      } catch (e) {
-        log(`prompt-queue: compress-history directive failed: ${e.message}`);
-      }
-      continue;
-    }
     const pipelineKey = resolvePipelineFromShorthand(block.pipeline);
     if (!pipelineKey) {
       log(`prompt-queue: shorthand "${block.pipeline}" resolved to no known pipeline — skipping.`);
       return;
     }
     if (defaultedPipeline) log(`prompt-queue: head block had no header — defaulting to "${defaultPipelineShort}" -> pipeline "${pipelineKey}".`);
+    // Per-block model/provider override: when the queue header carried a
+    // model token (e.g. `(hold) opus caf`, `gpt-4.1`, `sonnet`), mutate the
+    // in-memory topicConfig for this pipeline run only. Snapshot the prior
+    // values so the override is reverted in the finally below.
+    const _prevProvider = topicConfig ? topicConfig.provider : undefined;
+    const _prevModel    = topicConfig ? topicConfig.model    : undefined;
+    const _prevModels   = topicConfig && topicConfig.models  ? { ...topicConfig.models } : undefined;
+    let _overrodeTopicCfg = false;
+    if (topicConfig && (block.model || block.provider)) {
+      _overrodeTopicCfg = true;
+      if (block.provider) topicConfig.provider = block.provider;
+      if (block.model) {
+        topicConfig.model = block.model;
+        // Force the per-role table to follow so resolveRoleModel does not
+        // shadow the queue override with a stale role-pinned id.
+        topicConfig.models = topicConfig.models || {};
+        for (const r of ['planning', 'coding', 'assessment', 'fix']) topicConfig.models[r] = block.model;
+      }
+      log(`prompt-queue: header model/provider override -> provider="${block.provider || topicConfig.provider}" model="${block.model || topicConfig.model}" (for this pipeline run only).`);
+    }
     // Capture raw block text BEFORE inject so we can re-queue on failure
     // (preserves header line + body verbatim — `parseBlock` exposes `.raw`).
     const rawBlock = block.raw;
-    // Q2 durability guard: dequeueFirstUnheld above already destructively removed
-    // this block from the queue file. injectQueuedPromptIntoHistory is the ONLY
-    // thing that records it in history; if that write throws it would fall through
-    // to the outer catch ("queue left untouched") which is a lie — the block is
-    // already popped, so it would be lost from BOTH queue and history (the literal
-    // "dequeued, never submitted to the history file at all" failure). Re-queue the
-    // raw block at the head on inject failure so the prompt is never silently lost.
-    try {
-      injectQueuedPromptIntoHistory(block.body);
-    } catch (injErr) {
-      try { promptQueue.prependHead(topicDirPath(), rawBlock); }
-      catch (rqErr) { log(`prompt-queue: re-queue after inject failure also failed: ${rqErr.message}`); }
-      appendAutoResumeLog(`dequeueAndTriggerNext: inject-failed branch — restored popped block to queue head, aborting drain. err="${injErr.message}"`);
-      log(`prompt-queue: failed to write popped prompt into history (${injErr.message}) — block restored at head of queue, draining aborted.`);
-      try { playNotificationSound(); } catch {}
-      return;
-    }
+    injectQueuedPromptIntoHistory(block.body);
     // Audible cue: a new prompt was just fetched from the queue and injected
     // into history. Uses the distinct, innocuous `playQueueFetchSound` (NOT
     // the clarifying/error chime) so the user can tell "new work started"
@@ -3938,11 +4601,19 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
       try { promptQueue.prependHead(topicDirPath(), rawBlock); }
       catch (rqErr) { log(`prompt-queue: re-queue after failure also failed: ${rqErr.message}`); }
       log(`prompt-queue: in-process pipeline failed (${innerErr.message}) — popped block restored at head of queue. Draining aborted; investigate the failure above and re-run \`hrun ${topic}-cont\` (or any queue-draining alias) to retry.`);
-      // Audible cue: in-process pipeline stopped with error -> reuse the
-      // clarifying-question chime so the user notices even if terminal is
-      // unfocused. `playNotificationSound` already honours `play-notification-sound`.
-      try { playNotificationSound(); } catch {}
+      // Audible cue: in-process pipeline stopped with error -> dedicated
+      // error chime (distinct .wav) so the user can distinguish failure from
+      // completion or clarifying-question events.
+      try { playErrorSound(); } catch {}
       return;
+    } finally {
+      // Restore the snapshot regardless of pipeline outcome so a per-block
+      // override does not leak into the next iteration of the drain loop.
+      if (_overrodeTopicCfg && topicConfig) {
+        topicConfig.provider = _prevProvider;
+        topicConfig.model = _prevModel;
+        if (_prevModels) topicConfig.models = _prevModels; else delete topicConfig.models;
+      }
     }
    } catch (e) {
     log(`prompt-queue: dequeue failed (${e.message}) — queue left untouched.`);
@@ -3970,9 +4641,8 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
     // per-phase calls are throttled -> no taskbar flash per phase.
     saveAllVsCodeBuffers({ force: true });
     await saveUserChanges();
-    let _archiveSummarize = null;
-    try { _archiveSummarize = require('./compress-memory').summarizeContent; } catch { /* compress-memory unavailable */ }
-    await maybeAutoArchiveHistory(historyPath, { summarizeContent: _archiveSummarize });
+    // Plain rotation only — compression path removed; never injects a summary block.
+    await maybeAutoArchiveHistory(historyPath);
     // Startup sweep of stale `.parallel/*` sub-topic dirs (QA gap 5 — module
     // existed + was tested, but never invoked at boot). Best-effort.
     try {
@@ -3994,11 +4664,66 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
     // because that strip would erase the empty placeholder we detect here.
     await fillEmptyPromptFromQueueOrInteractive();
     stripTrailingUserPrompt(historyPath);
+    // Per-prompt `## User Prompt` header: resolve pipeline + model/provider from
+    // the first line of the latest prompt block. CLI-explicit role always wins
+    // the pipeline; the header's model/provider is ALWAYS applied for this run
+    // (snapshot + finally-restore mirrors the queue header override path).
+    let _hdrOverrode = false, _hdrPrevProvider, _hdrPrevModel, _hdrPrevModels;
+    {
+      const _hdr = applyPromptFileHeader(historyPath);
+      if (_hdr) {
+        if (!roleExplicit && _hdr.pipeline) {
+          const _resolved = resolvePipelineFromShorthand(_hdr.pipeline);
+          if (_resolved) { roleArg = _resolved; log(`prompt-header: pipeline "${_hdr.pipeline}" -> "${roleArg}".`); }
+        }
+        if (topicConfig && (_hdr.model || _hdr.provider)) {
+          _hdrOverrode = true;
+          _hdrPrevProvider = topicConfig.provider;
+          _hdrPrevModel = topicConfig.model;
+          _hdrPrevModels = topicConfig.models ? { ...topicConfig.models } : undefined;
+          if (_hdr.provider) topicConfig.provider = _hdr.provider;
+          if (_hdr.model) {
+            topicConfig.model = _hdr.model;
+            topicConfig.models = topicConfig.models || {};
+            for (const r of ['planning', 'coding', 'assessment', 'fix']) topicConfig.models[r] = _hdr.model;
+          }
+          // Record the override so per-phase `saveResumeState` persists it; an
+          // auto-resume re-reads it from state since the header is gone from disk.
+          _promptHeaderResumeOverride = { model: _hdr.model || null, provider: _hdr.provider || null };
+          log(`prompt-header: model/provider override -> provider="${_hdr.provider || topicConfig.provider}" model="${_hdr.model || topicConfig.model}" (this run only).`);
+        }
+      }
+    }
+    // No CLI role and no header pipeline -> fall back to promptQueue.defaultPipeline.
+    if (!roleArg) {
+      const _dp = String(configUtils.cfgRead(topicConfig, config, 'promptQueue.defaultPipeline', 'all') || 'all');
+      roleArg = resolvePipelineFromShorthand(_dp) || 'all';
+      log(`prompt-header: no explicit role/header pipeline — defaulting to "${_dp}" -> "${roleArg}".`);
+    }
     let pipelineResult = false;
     try {
       if (roleArg === 'continue') {
         const state = loadResumeState(topic);
         if (!state) die(`No resume state found for topic "${topic}" at ${path.relative(ROOT, statePathFor(topic))}. Nothing to continue.`);
+        // Re-apply any per-prompt header model/provider persisted at first
+        // dispatch. The header line was stripped from history then, so it can no
+        // longer be re-parsed here — without this the resumed run reverts to the
+        // default model. Snapshot + finally-restore mirrors the first-dispatch path.
+        if (topicConfig && (state.headerModel || state.headerProvider)) {
+          _hdrOverrode = true;
+          _hdrPrevProvider = topicConfig.provider;
+          _hdrPrevModel = topicConfig.model;
+          _hdrPrevModels = topicConfig.models ? { ...topicConfig.models } : undefined;
+          if (state.headerProvider) topicConfig.provider = state.headerProvider;
+          if (state.headerModel) {
+            topicConfig.model = state.headerModel;
+            topicConfig.models = topicConfig.models || {};
+            for (const r of ['planning', 'coding', 'assessment', 'fix']) topicConfig.models[r] = state.headerModel;
+          }
+          // Keep it live so this resumed pipeline's own saveResumeState writes re-persist it.
+          _promptHeaderResumeOverride = { model: state.headerModel || null, provider: state.headerProvider || null };
+          log(`prompt-header: re-applied persisted resume override -> provider="${state.headerProvider || topicConfig.provider}" model="${state.headerModel || topicConfig.model}".`);
+        }
         log(`Continuing topic "${topic}" pipeline "${state.pipeline}" from phase "${state.phase}" (index ${state.phaseIndex}).`);
         pipelineResult = await runPipeline(state.pipeline, state.phaseIndex);
         appendAutoResumeLog(`dispatch: post-runPipeline (continue) pipelineResult typeof=${typeof pipelineResult} value=${JSON.stringify(pipelineResult)}`);
@@ -4008,6 +4733,14 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
       }
       if (pipelineResult === true) await emitEndOfRunLimits();
     } finally {
+      // Restore any prompt-file header model/provider override BEFORE the queue
+      // drain so the per-prompt override never leaks into subsequent queued
+      // blocks (which carry their own headers).
+      if (_hdrOverrode && topicConfig) {
+        topicConfig.provider = _hdrPrevProvider;
+        topicConfig.model = _hdrPrevModel;
+        if (_hdrPrevModels) topicConfig.models = _hdrPrevModels; else delete topicConfig.models;
+      }
       // finally-gated dequeue: only drain on confirmed `=== true` completion.
       // Rule 5: thrown / die() / process.exit() / auto-resume `return false` paths
       // intentionally skip dequeue so an errored run does not advance the queue.
@@ -4019,9 +4752,8 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
       // the final available prompt). Re-reads queue length post-drain so
       // "all-held" early-return and any held-only remainder do NOT chime —
       // only a genuinely empty queue counts as "last prompt finished".
-      // Uses dedicated `playCompletionSound` (distinct `completion-sound-file`)
-      // so "all work done" sounds different from clarifying/queue-fetch tones;
-      // still gated by `play-notification-sound`.
+      // Uses dedicated `playCompletionSound` (distinct .wav) so the
+      // session-ending event has its own tone separate from clarifying/error.
       if (_drainGate) {
         let _postDrainPending = -1;
         try { _postDrainPending = promptQueue.queueLength(topicDirPath()); } catch {}
@@ -4036,9 +4768,9 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
   } catch (err) {
     try { appendAutoResumeLog(`dispatch: outer-catch err="${err && err.message}" stack=${err && err.stack ? String(err.stack).split('\n').slice(0,3).join(' | ') : 'n/a'}`); } catch {}
     ensureAutoModelRestored();
-    // Audible cue: dispatch-level pipeline error -> chime before `die()` exits
-    // so the user is alerted that the pipeline stopped with an error.
-    try { playNotificationSound(); } catch {}
+    // Audible cue: dispatch-level pipeline error -> dedicated error chime
+    // before `die()` exits so failure has a tone distinct from completion.
+    try { playErrorSound(); } catch {}
     die(err.message);
   }
   ensureAutoModelRestored();

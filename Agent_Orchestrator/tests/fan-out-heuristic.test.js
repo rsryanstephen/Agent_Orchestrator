@@ -25,6 +25,11 @@ const { splitPromptIntoTasks, parsePlanningSubtasks, roleHeaderFor, ROLE_HEADER 
 
 // Source-level wiring checks still read run-agent.js.
 const src = fs.readFileSync(path.join(HARNESS, 'src', 'run-agent.js'), 'utf8');
+// Key-resolution logic was extracted into pure resolvers in config-utils.js
+// (resolveMaxConcurrentAgents / resolveParallelAssessmentAgents); run-agent.js
+// now delegates via getMaxConcurrentAgents / getParallelAssessmentAgents. The
+// cfgRead key reads therefore live here, not in run-agent.js.
+const cfgSrc = fs.readFileSync(path.join(HARNESS, 'src', 'config-utils.js'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -174,16 +179,16 @@ test('runAssessmentParallel: source caps tasks array at getMaxConcurrentAgents()
 });
 
 test('getMaxConcurrentAgents: falls back to max-concurrent-agents if per-topic key absent', () => {
-  assert.match(src, /max-parallel-agents-per-topic.*\n.*max-concurrent-agents|max-concurrent-agents.*fallback|cfgRead.*max-concurrent-agents/,
+  assert.match(cfgSrc, /max-parallel-agents-per-topic.*\n.*max-concurrent-agents|max-concurrent-agents.*fallback|cfgRead.*max-concurrent-agents/,
     'fallback to legacy key must be present');
-  // Confirm both key names appear in source.
-  assert.ok(src.includes('max-parallel-agents-per-topic'), 'new key must be present');
-  assert.ok(src.includes('max-concurrent-agents'), 'legacy fallback key must be present');
+  // Confirm both key names appear in the resolver source.
+  assert.ok(cfgSrc.includes('max-parallel-agents-per-topic'), 'new key must be present');
+  assert.ok(cfgSrc.includes('max-concurrent-agents'), 'legacy fallback key must be present');
 });
 
 // ── parallel-assessment-agents=false: single assessor path ───────────────────
 test('getParallelAssessmentAgents: defaults to false when key absent', () => {
-  assert.match(src, /cfgRead\([^)]*'parallel-assessment-agents',\s*false\)/,
+  assert.match(cfgSrc, /cfgRead\([^)]*'parallel-assessment-agents',\s*false\)/,
     "getParallelAssessmentAgents must default to false");
 });
 
