@@ -3,9 +3,7 @@
   "provider": "claude-code",
   "// topic-ids": "Numeric-ID -> topic-name map. Replaces legacy `ids` + redundant `topics` registry. Topic existence is derived from values of this map (and the on-disk topic-files-dir).",
   "topic-ids": {
-    "1": "claude_harness",
-    "2": "cache_possible_values",
-    "3": "general"
+    "1": "harness_dev"
   },
   "regression-tests": true,
   "stage-and-commit": true,
