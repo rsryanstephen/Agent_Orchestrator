@@ -1,5 +1,5 @@
-Agent_Orchestrator/topic_files
-Agent_Orchestrator/.state
-Agent_Orchestrator/.tmp
-Agent_Orchestrator/.last-topic
-Agent_Orchestrator/.model-catalog-cache.json
+topic_files/
+.state/
+.tmp/
+.last-topic
+.model-catalog-cache.json
