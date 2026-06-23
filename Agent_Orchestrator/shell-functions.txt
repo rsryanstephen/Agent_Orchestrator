@@ -1,16 +1,25 @@
 # Agent Orchestrator shell functions.
-# Run from the root of the repo where Agent_Orchestrator/ was placed.
 
-# Copy the Agent Orchestrator from `~/Repos/Agent_Orchestrator/` to the current working directory
-hcopy()          { \cp -r ~/Repos/Agent_Orchestrator/Agent_Orchestrator .; }
+_harness_install_needed() {
+    local harness_root="${HARNESS_ROOT:-{{harness_root}}}"
+    echo "Please run the install script using \`node $harness_root/src/install-shell-functions.js\`, which will install the shell functions needed." >&2
+    return 1
+}
 
-hedit()          { code ~/Repos/Agent_Orchestrator; }  # hedit — open the repo in VS Code
+# Harness install (idempotent — adds these functions to your rc file if missing and sets your HARNESS_ROOT environment variable). 
+# Run with --force to overwrite existing functions.
+# node {{harness_root}}/src/install-shell-functions.js "$@"; [--force]
+# eg. node ~/Repos/Agent_Orchestrator/Agent_Orchestrator/src/install-shell-functions.js --force
+
+# If these stubs don't run, harness shell functions have not been installed yet.
+
+hedit()          { _harness_install_needed; }  # hedit — open the harness repo in VS Code
 
 # Topic management
-hstartt()        { \node Agent_Orchestrator/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
-hsett()          { \node Agent_Orchestrator/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
-hrentopic()      { \node Agent_Orchestrator/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
-hrmtopic()       { \node Agent_Orchestrator/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>
+hstartt()        { _harness_install_needed; }   # hstartt <topic> [id]
+hsett()          { _harness_install_needed; }     # hsett <topic> <id>
+hrentopic()      { _harness_install_needed; }  # hrentopic <topic|id> <new-name>
+hrmtopic()       { _harness_install_needed; }       # hrmtopic <topic|id|all>
 
 # Unified runner — single command for single-topic and parallel runs.
 # Usage: hrun [<id>-]<cmd> [[<id>-]<cmd> ...]
@@ -19,24 +28,21 @@ hrmtopic()       { \node Agent_Orchestrator/src/remove-topic.js "$1"; }       # 
 #   hrun caf          # last-touched topic, code-assess-fix
 #   hrun 1-c 2-caf    # topic 1 coding AND topic 2 code-assess-fix in parallel
 # Shorthand: p|c|a|f|af|pc|caf|all|pcaf|cont
-hrun()           { \node Agent_Orchestrator/src/run-parallel.js "$@"; }
+hrun()           { _harness_install_needed; }
 
 # hresume [topic|id|all] — manually trigger auto-resume for topics in the wake queue
 # (mostly for testing — this is normally triggered automatically by the OS scheduler at the token-limit reset time).
-hresume()        { \node Agent_Orchestrator/src/auto-resume.js "$@"; }
+hresume()        { _harness_install_needed; }
 
 # Memory (single-file-per-topic — no role argument)
-hclear()         { \node Agent_Orchestrator/src/clear-memory.js "$@"; }    # hclear [topic|id|all]
-hscrubmem()      { \node Agent_Orchestrator/src/scrub-compressed-memory.js "$@"; } # hscrubmem [topic|id|all] — strip stale ## Compressed Memory sections
+hclear()         { _harness_install_needed; }    # hclear [topic|id|all]
+hscrubmem()      { _harness_install_needed; } # hscrubmem [topic|id|all] — strip stale ## Compressed Memory sections
 
 # Prompt-queue maintenance
 # hqregen [topic|id|all] — destructively wipe and re-seed prompt-queue.md for a topic
-hqregen()        { \node Agent_Orchestrator/src/regenerate-queue.js "$@"; }
+hqregen()        { _harness_install_needed; }
 
 # Misc
-hupdate-models()   { \node Agent_Orchestrator/src/update-models-reference.js; }  # hupdate-models
-hfetch-models()    { \node Agent_Orchestrator/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
-hprobe()           { \node Agent_Orchestrator/src/run-agent.js --probe; }  # hprobe — checks provider auth
-
-# Harness install (idempotent — adds these functions to your rc file if missing)
-# \node Agent_Orchestrator/src/install-shell-functions.js "$@"; [--force]
+hupdate-models()   { _harness_install_needed; }  # hupdate-models
+hfetch-models()    { _harness_install_needed; }             # hfetch-models — force-refresh model catalog cache
+hprobe()           { _harness_install_needed; }  # hprobe — checks provider auth

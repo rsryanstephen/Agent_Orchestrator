@@ -8,7 +8,7 @@
     "3": "general"
   },
   "regression-tests": true,
-  "stage-and-commit": true,
+  "stage-and-commit": false,
   "use-interrogate": true,
   "use-caveman": true,
   "// use-karpathy": "Append the karpathy-guidelines skill body to all agent system prompts. When false, a neutralisation clause suppresses the Karpathy Guidelines section from ~/.claude/CLAUDE.md so it does not load into harness agent calls.",
@@ -67,6 +67,8 @@
   },
   "// preferred-terminal": "Terminal type used when the harness must spawn a new window (auto-resume-on-token-limit, prompt-queue same-terminal fallback). One of `git-bash` | `cmd` | `powershell` | `wt` | `none`. Legacy key `resume-terminal` is still read as a fallback with a deprecation log.",
   "preferred-terminal": "git-bash",
+  "// harness-root": "Absolute path to the single Agent_Orchestrator instance (the inner dir holding `src/` and `shell-functions.txt`). `install-shell-functions.js` substitutes this for the `{{HARNESS_ROOT}}` placeholder so the installed rc functions use absolute paths and work from ANY repo — no per-repo copy needed. Empty/absent -> installer self-detects via the script location. Use forward slashes on Windows (e.g. `C:/Users/you/Repos/Agent_Orchestrator/Agent_Orchestrator`).",
+  "harness-root": "",
   "auto-install-shell-functions": false,
   "show-usage-stats": true,
   "stream-output": true,

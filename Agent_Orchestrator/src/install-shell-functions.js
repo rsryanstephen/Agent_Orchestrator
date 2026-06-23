@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { loadConfig, writeConfig, globalConfigPath } = require('./config-utils');
 
 // Sentinel markers wrapping the managed block inside ~/.bashrc / ~/.zshrc — used to
 // detect and re-write our section without disturbing user-authored shell code.
@@ -20,10 +21,76 @@ function fail(msg) { console.error(`[install-shell-functions] ERROR: ${msg}`); }
 
 const SOURCE = path.join(__dirname, '..', 'shell-functions.txt');
 
-// Functions use relative paths — they must be run from the repo root where
-// Agent_Orchestrator/ was placed. No substitution needed; pass through as-is.
+// Resolve the absolute harness root substituted into shell-functions.txt.
+// Prefers the `harness-root` global-config key; falls back to the inner
+// Agent_Orchestrator dir derived from this script's location. Normalizes
+// Windows backslashes -> forward slashes (bash-safe) and strips trailing slash.
+// Expand a leading `~` / `~/` to the user's home dir. `path.join` and
+// `fs.existsSync` treat `~` as a literal segment, so a config value like
+// "~/Repos/.../Agent_Orchestrator" would fail the src/ existence check and
+// trigger a false "no src/ subdir" warning. Expand before any fs use.
+function expandTilde(p) {
+  if (typeof p !== 'string' || !p) return p;
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function resolveHarnessRoot() {
+  let root = '';
+  try {
+    const cfg = loadConfig(globalConfigPath());
+    // Expand `~` so a tilde-prefixed harness-root resolves to a real path.
+    if (cfg && typeof cfg['harness-root'] === 'string') root = expandTilde(cfg['harness-root'].trim());
+  } catch (e) { /* missing/unreadable config -> fall back to self-detect */ }
+  if (!root) root = path.join(__dirname, '..');
+  // Sanity-check the resolved root actually points at a harness dir (must contain
+  // src/). A wrong-but-nonempty config path would otherwise render into every h*
+  // fn silently broken; warn + fall back to self-detect instead of trusting garbage.
+  if (!fs.existsSync(path.join(root, 'src'))) {
+    warn(`harness-root "${root}" has no src/ subdir — falling back to self-detected path. Fix "harness-root" in global-config.json.`);
+    root = path.join(__dirname, '..');
+  }
+  return root.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+// Persist the resolved (auto-detected/expanded) harness root back into
+// global-config.json so the user ends up with an explicit absolute `harness-root`
+// after install — satisfies the requirement that installing also records the
+// auto-detected route. Only writes when the stored value is missing or differs
+// from the resolved root (avoids needless rewrites), and is best-effort: a write
+// failure logs a warning but never aborts the install. writeConfig round-trips
+// the existing `// harness-root` inline comment.
+function persistHarnessRoot(root) {
+  if (!root) return;
+  let cfgPath;
+  try {
+    cfgPath = globalConfigPath();
+    const cfg = loadConfig(cfgPath);
+    const current = (cfg && typeof cfg['harness-root'] === 'string') ? cfg['harness-root'].trim() : '';
+    const currentNorm = current.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (currentNorm === root) return; // already recorded — no rewrite needed
+    cfg['harness-root'] = root;
+    writeConfig(cfgPath, cfg);
+    ok(`recorded auto-detected harness-root "${root}" in ${cfgPath}`);
+  } catch (e) {
+    warn(`could not record harness-root in global-config.json: ${e.message}`);
+  }
+}
+
+// Substitute the {{HARNESS_ROOT}} placeholder so installed rc functions use
+// absolute paths and work from any repo. Guards against an empty resolved root
+// when the placeholder is actually present in the source. Also persists the
+// resolved root back to global-config.json so subsequent runs have an explicit
+// absolute path.
 function renderSource(raw) {
-  return raw;
+  if (!raw.includes('{{HARNESS_ROOT}}')) return raw;
+  const root = resolveHarnessRoot();
+  if (!root) {
+    throw new Error('Cannot substitute {{HARNESS_ROOT}}: set "harness-root" in global-config.json to the absolute path of the Agent_Orchestrator inner directory.');
+  }
+  persistHarnessRoot(root);
+  return raw.replace(/\{\{HARNESS_ROOT\}\}/g, root);
 }
 
 // Programmatic install entry (CLI re-implements this below to support exit codes).
@@ -35,7 +102,7 @@ function install({ force = false } = {}) {
   }
   const sourceContent = renderSource(fs.readFileSync(SOURCE, 'utf8'));
   const fnNames = Array.from(sourceContent.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)/gm)).map(m => m[1]);
-  const LEGACY_FNS = ['runp','runc','runa','runf','runaf','runpc','runcaf','runall','runcont','runpar','hstartt','hsett','hrentopic','hrmtopic','hrun','hresume','hclear','hcompress','hqregen','hupdate-models','hprobe'];
+  const LEGACY_FNS = ['runp','runc','runa','runf','runaf','runpc','runcaf','runall','runcont','runpar','hstartt','hsett','hrentopic','hrmtopic','hrun','hresume','hclear','hcompress','hqregen','hupdate-models','hprobe','hcopy'];
   if (fnNames.length === 0) {
     return { ok: false, reason: `No function definitions found in ${SOURCE}`, installedCount: 0, skippedCount: 0, failedCount: 1 };
   }
@@ -107,7 +174,7 @@ function install({ force = false } = {}) {
   log(`Summary — installed: ${installedCount}, skipped: ${skippedCount}, failed: ${failedCount}`);
   if (installedCount > 0) {
     log(`Open a new shell, or run "source ~/.bashrc" / "source ~/.zshrc" to load the functions.`);
-    log(`Functions use relative paths — run them from the repo root where Agent_Orchestrator/ was placed.`);
+    log(`Functions use absolute paths — run them from any repo.`);
   }
   return { ok: failedCount === 0, installedCount, skippedCount, failedCount };
 }
@@ -128,7 +195,7 @@ const sourceContent = renderSource(fs.readFileSync(SOURCE, 'utf8'));
 const fnNames = Array.from(sourceContent.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)/gm)).map(m => m[1]);
 // Legacy function names from previous harness versions — stripped on --force install so users
 // don't end up with both the old runX / runpar and the new hrun definitions in their rc file.
-const LEGACY_FNS = ['runp','runc','runa','runf','runaf','runpc','runcaf','runall','runcont','runpar','hstartt','hsett','hrentopic','hrmtopic','hrun','hresume','hclear','hcompress','hqregen','hupdate-models','hprobe'];
+const LEGACY_FNS = ['runp','runc','runa','runf','runaf','runpc','runcaf','runall','runcont','runpar','hstartt','hsett','hrentopic','hrmtopic','hrun','hresume','hclear','hcompress','hqregen','hupdate-models','hprobe','hcopy'];
 if (fnNames.length === 0) {
   fail(`No function definitions found in ${SOURCE}`);
   process.exit(1);
@@ -220,7 +287,7 @@ console.log('');
 log(`Summary — installed: ${installedCount}, skipped: ${skippedCount}, failed: ${failedCount}`);
 if (installedCount > 0) {
   log(`Open a new shell, or run "source ~/.bashrc" / "source ~/.zshrc" to load the functions.`);
-  log(`Functions use relative paths — run them from the repo root where Agent_Orchestrator/ was placed.`);
+  log(`Functions use absolute paths — run them from any repo.`);
 }
 process.exit(failedCount > 0 ? 1 : 0);
 

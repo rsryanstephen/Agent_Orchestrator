@@ -10,14 +10,14 @@ A local agent orchestration system built on top of the Claude Code CLI. Each **t
 
 **On this page:** [Prerequisites](#prerequisites) · [Installation](#installation) · [Shell Functions](#shell-functions-bash--zsh) · [Running Agents](#running-agents) · [Topic Management](#topic-management) · [Prompt Queue](#prompt-queue-auto-advance-multiple-prompts) · [Memory Management](#memory-management) · [Typical Workflow](#typical-workflow) · [Concepts](#concepts) · [Intra-topic parallelism](#intra-topic-parallelism-auto-fan-out-within-a-single-topic) · [Cross-topic parallelism](#cross-topic-parallelism-hrun-with-multiple-tokens) · [Clarifying-questions pause](#clarifying-questions-pause-auto-answer-clarifying-questions-false) · [Background tasks](#background-tasks) · [Interrupted runs / auto-resume](#interrupted-runs-continue-and-auto-resume-on-token-limit) · [Configuration](#configuration-global-configjson) · [Provider Selection](#provider-selection) · [Provider Limitations](#provider-limitations) · [Troubleshooting](#troubleshooting)
 
-**Where the aliases go.** The canonical shell functions live in [`shell-functions.txt`](shell-functions.txt). Install them between managed markers in your `~/.bashrc` / `~/.zshrc`:
+**Where the aliases go.** Keep **one** copy of `Agent_Orchestrator/` anywhere, set `harness-root` in `global-config.json` to its absolute inner-dir path, then install. The canonical shell functions live in [`shell-functions.txt`](shell-functions.txt); the installer substitutes `{{HARNESS_ROOT}}` with that absolute path and writes the block between managed markers in your `~/.bashrc` / `~/.zshrc`:
 
 ```bash
-node Agent_Orchestrator/src/install-shell-functions.js   # appends the block, idempotent
-source ~/.bashrc                                          # or ~/.zshrc
+node /abs/path/Agent_Orchestrator/src/install-shell-functions.js   # writes absolute-path block, idempotent
+source ~/.bashrc                                                   # or ~/.zshrc
 ```
 
-Or paste the `shell-functions.txt` block manually. The installed functions use **relative paths** — your shell's working directory must be the repo root.
+The installed functions use **absolute paths** — run `hrun`, `hstartt`, etc. from **any** repo; no per-repo copy needed. If `harness-root` is empty the installer self-detects from the script location.
 
 **How to run (minimal walkthrough):**
 
@@ -41,12 +41,12 @@ Read the appended responses in the history file, then queue or type the next pro
 
 ## Installation
 
-The harness is repo-agnostic. To use it in a project:
+The harness is repo-agnostic and lives as a **single instance** that serves every repo. To set it up:
 
-1. **Copy the entire `Agent_Orchestrator/` directory into the root of the repository where you want to use it.**
-2. **Run `node Agent_Orchestrator/src/install-shell-functions.js`** (from the repo root) — the installer appends the `h*` shell functions to your rc file. The functions use relative paths and are not tied to any specific path.
-
-> **Note:** Run the installed shell functions from the repo root where the harness has been placed.
+1. **Keep one copy of `Agent_Orchestrator/`** anywhere on disk (no need to copy it per repo).
+2. **Set `harness-root` in `global-config.json`** to the absolute path of the inner `Agent_Orchestrator` directory (the one holding `src/` and `shell-functions.txt`). On Windows use forward slashes, e.g. `C:/Users/you/Repos/Agent_Orchestrator/Agent_Orchestrator`. Leave it empty to let the installer self-detect from its own location.
+3. **Run `node <harness-root>/src/install-shell-functions.js`** — the installer substitutes `{{HARNESS_ROOT}}` and appends the `h*` shell functions (with absolute paths) to your rc file. Re-run with `--force` to refresh a stale block (e.g. one from an older relative-path version).
+4. **Open any repo** and use `hrun`, `hstartt`, etc. — they resolve harness bookkeeping against `harness-root` and operate on your current working directory.
 
 ---
 
@@ -54,18 +54,20 @@ The harness is repo-agnostic. To use it in a project:
 
 Aliases do not support positional parameters in bash/zsh — use **functions** instead. The canonical source is [`shell-functions.txt`](shell-functions.txt).
 
-**Quick install:** run `node Agent_Orchestrator/src/install-shell-functions.js`. It detects whether any of the harness functions (`hstartt`, `hrun`, etc.) are already defined in your `~/.bashrc` / `~/.zshrc` — if not, it appends the block from `shell-functions.txt` between managed markers. Idempotent: re-running does nothing unless you pass `--force` (which also removes any pre-existing unmanaged definitions, **including legacy `runc`/`runpar`/etc. helpers from older harness versions**, before installing the managed block). If the rc file is read-only it prints a permission error — it does **not** auto-elevate; you must re-run manually from an elevated shell (Run as Administrator on Windows, or prefix with `sudo` on macOS/Linux). After install, open a new shell or `source ~/.bashrc` / `source ~/.zshrc`. **Note:** the installed functions use relative paths — they only work when your shell's working directory is the repo root.
+**Quick install:** run `node Agent_Orchestrator/src/install-shell-functions.js`. It detects whether any of the harness functions (`hstartt`, `hrun`, etc.) are already defined in your `~/.bashrc` / `~/.zshrc` — if not, it appends the block from `shell-functions.txt` between managed markers. Idempotent: re-running does nothing unless you pass `--force` (which also removes any pre-existing unmanaged definitions, **including legacy `runc`/`runpar`/etc. helpers from older harness versions**, before installing the managed block). If the rc file is read-only it prints a permission error — it does **not** auto-elevate; you must re-run manually from an elevated shell (Run as Administrator on Windows, or prefix with `sudo` on macOS/Linux). After install, open a new shell or `source ~/.bashrc` / `source ~/.zshrc`. **Note:** the installed functions use **absolute paths** (substituted from `harness-root`) — they work from any repo's working directory.
 
 Or add them manually (the block below may drift from [`shell-functions.txt`](shell-functions.txt) — treat `shell-functions.txt` as the canonical source):
 
 > **Git Bash on Windows:** these functions use `\node` (escaped) rather than `node`. On Git Bash for Windows `node` is aliased to `winpty node.exe`, which wraps the child process in a pseudo-terminal that (a) causes bash background jobs (`&`) to be `Stopped` immediately on SIGTTOU, and (b) breaks `run-parallel.js`'s prefixed-stream output. The leading backslash bypasses the alias and runs the real `node.exe` directly. On macOS/Linux the `\` is harmless — it simply runs `node`.
 
+Replace `{{HARNESS_ROOT}}` with the absolute path of your harness inner directory (forward slashes on Windows):
+
 ```bash
 # Topic management
-hstartt()    { \node Agent_Orchestrator/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
-hsett()      { \node Agent_Orchestrator/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
-hrentopic()  { \node Agent_Orchestrator/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
-hrmtopic()   { \node Agent_Orchestrator/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>
+hstartt()    { \node {{HARNESS_ROOT}}/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
+hsett()      { \node {{HARNESS_ROOT}}/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
+hrentopic()  { \node {{HARNESS_ROOT}}/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
+hrmtopic()   { \node {{HARNESS_ROOT}}/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>
 
 # Unified runner — single command for single-topic and parallel runs.
 # Usage: hrun [[<id|topic>-]<cmd> ...]
@@ -77,24 +79,24 @@ hrmtopic()   { \node Agent_Orchestrator/src/remove-topic.js "$1"; }       # hrmt
 #   hrun claude_harness  # named topic — pipeline from header / default
 #   hrun              # last-touched topic — pipeline from header / default
 # Shorthand: p|c|a|f|af|pc|caf|all|pcaf|cont
-hrun()       { \node Agent_Orchestrator/src/run-parallel.js "$@"; }
+hrun()       { \node {{HARNESS_ROOT}}/src/run-parallel.js "$@"; }
 
-hresume()    { \node Agent_Orchestrator/src/auto-resume.js "$@"; }  # hresume [topic|id|all] — manually trigger auto-resume for topics in the wake queue (mostly for testing — normally triggered automatically by the OS scheduler at the token-limit reset time)
+hresume()    { \node {{HARNESS_ROOT}}/src/auto-resume.js "$@"; }  # hresume [topic|id|all] — manually trigger auto-resume for topics in the wake queue (mostly for testing — normally triggered automatically by the OS scheduler at the token-limit reset time)
 
 # Memory (single-file-per-topic — no role argument)
-hclear()     { \node Agent_Orchestrator/src/clear-memory.js "$@"; }    # hclear [topic|id|all]
-hscrubmem()  { \node Agent_Orchestrator/src/scrub-compressed-memory.js "$@"; } # hscrubmem [topic|id|all] — strip stale ## Compressed Memory sections
+hclear()     { \node {{HARNESS_ROOT}}/src/clear-memory.js "$@"; }    # hclear [topic|id|all]
+hscrubmem()  { \node {{HARNESS_ROOT}}/src/scrub-compressed-memory.js "$@"; } # hscrubmem [topic|id|all] — strip stale ## Compressed Memory sections
 
 # Prompt-queue maintenance
-hqregen()    { \node Agent_Orchestrator/src/regenerate-queue.js "$@"; } # hqregen [topic|id|all] — destructively wipe and re-seed prompt-queue.md
+hqregen()    { \node {{HARNESS_ROOT}}/src/regenerate-queue.js "$@"; } # hqregen [topic|id|all] — destructively wipe and re-seed prompt-queue.md
 
 # Misc
-hupdate-models() { \node Agent_Orchestrator/src/update-models-reference.js; }  # hupdate-models
-hfetch-models()  { \node Agent_Orchestrator/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
-hprobe()         { \node Agent_Orchestrator/src/run-agent.js --probe; }  # hprobe — checks provider auth
+hupdate-models() { \node {{HARNESS_ROOT}}/src/update-models-reference.js; }  # hupdate-models
+hfetch-models()  { \node {{HARNESS_ROOT}}/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
+hprobe()         { \node {{HARNESS_ROOT}}/src/run-agent.js --probe; }  # hprobe — checks provider auth
 
 # Harness install (idempotent — adds these functions to your rc file if missing)
-# \node Agent_Orchestrator/src/install-shell-functions.js "$@"; [--force]
+# \node {{HARNESS_ROOT}}/src/install-shell-functions.js "$@"; [--force]
 ```
 
 Usage with shell functions:

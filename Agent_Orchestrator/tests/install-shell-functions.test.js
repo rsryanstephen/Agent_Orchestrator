@@ -133,4 +133,30 @@ test('(10) managed block template includes do-not-edit comment', () => {
     'managed block header must instruct user to re-run with --force to refresh');
 });
 
+// ── (11) tilde in harness-root is expanded before the src/ existence check ─────
+test('(11) resolveHarnessRoot expands ~ so a tilde-prefixed harness-root resolves', () => {
+  assert.ok(/expandTilde/.test(installSrc),
+    'install source must define an expandTilde helper to expand ~ in harness-root');
+  assert.ok(/os\.homedir\(\)/.test(installSrc),
+    'expandTilde must resolve ~ to os.homedir()');
+  // The expansion must be applied to the config value before fs.existsSync(src) runs,
+  // otherwise a "~/..."-prefixed harness-root falsely warns "no src/ subdir".
+  assert.ok(/expandTilde\(\s*cfg\[['"]harness-root['"]\]\.trim\(\)\s*\)/.test(installSrc),
+    'resolveHarnessRoot must apply expandTilde to the harness-root config value');
+});
+
+// ── (12) install persists the auto-detected harness-root back to global config ─
+test('(12) renderSource persists resolved harness-root to global-config via writeConfig', () => {
+  assert.ok(/writeConfig/.test(installSrc),
+    'install source must import/use writeConfig to persist harness-root');
+  assert.ok(/function persistHarnessRoot/.test(installSrc),
+    'install source must define persistHarnessRoot to record the resolved root');
+  assert.ok(/persistHarnessRoot\(root\)/.test(installSrc),
+    'renderSource must call persistHarnessRoot(root) after resolving the harness root');
+  assert.ok(/cfg\[['"]harness-root['"]\]\s*=\s*root/.test(installSrc),
+    'persistHarnessRoot must assign the resolved root to cfg[harness-root]');
+  assert.ok(/if \(currentNorm === root\) return/.test(installSrc),
+    'persistHarnessRoot must skip the rewrite when the stored value already matches');
+});
+
 if (_failed === 0) console.log('\nAll install-shell-functions tests passed.');
