@@ -1,5 +1,5 @@
-topic_files/
-.state/
-.tmp/
+topic_files
+.state
+.tmp
 .last-topic
 .model-catalog-cache.json

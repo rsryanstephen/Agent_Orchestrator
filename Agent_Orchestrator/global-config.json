@@ -3,10 +3,12 @@
   "provider": "claude-code",
   "// topic-ids": "Numeric-ID -> topic-name map. Replaces legacy `ids` + redundant `topics` registry. Topic existence is derived from values of this map (and the on-disk topic-files-dir).",
   "topic-ids": {
-    "1": "harness_dev"
+    "1": "claude_harness",
+    "2": "cache_possible_values",
+    "3": "general"
   },
   "regression-tests": true,
-  "stage-and-commit": true,
+  "stage-and-commit": false,
   "use-interrogate": true,
   "use-caveman": true,
   "// use-karpathy": "Append the karpathy-guidelines skill body to all agent system prompts. When false, a neutralisation clause suppresses the Karpathy Guidelines section from ~/.claude/CLAUDE.md so it does not load into harness agent calls.",
