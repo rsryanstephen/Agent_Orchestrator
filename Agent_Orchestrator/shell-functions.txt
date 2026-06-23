@@ -4,6 +4,8 @@
 # Copy the Agent Orchestrator from `~/Repos/Agent_Orchestrator/` to the current working directory
 hcopy()          { \cp -r ~/Repos/Agent_Orchestrator/Agent_Orchestrator .; }
 
+hedit()          { code ~/Repos/Agent_Orchestrator; }  # hedit — open the repo in VS Code
+
 # Topic management
 hstartt()        { \node Agent_Orchestrator/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
 hsett()          { \node Agent_Orchestrator/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
