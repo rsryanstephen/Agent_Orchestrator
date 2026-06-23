@@ -13,6 +13,7 @@ const { loadConfig, writeConfig, globalConfigPath } = require('./config-utils');
 // detect and re-write our section without disturbing user-authored shell code.
 const BEGIN = '# >>> Agent_Orchestrator shell functions >>>';
 const END = '# <<< Agent_Orchestrator shell functions <<<';
+const STUB_HINT = 'Please run the install script using';
 
 function log(msg)  { console.log(`[install-shell-functions] ${msg}`); }
 function ok(msg)   { console.log(`[install-shell-functions] OK: ${msg}`); }
@@ -93,6 +94,41 @@ function renderSource(raw) {
   return raw.replace(/\{\{HARNESS_ROOT\}\}/g, root);
 }
 
+function stripStubBlock(content, allKnown) {
+  if (!content.includes(STUB_HINT)) return { content, removed: false, count: 0 };
+
+  let next = content;
+  let removed = false;
+  let count = 0;
+  const helperPattern = /^[ \t]*_harness_install_needed\s*\(\)\s*\{[\s\S]*?^[ \t]*\}[ \t]*\n?/m;
+  if (helperPattern.test(next)) {
+    next = next.replace(helperPattern, '');
+    removed = true;
+  }
+
+  for (const name of allKnown) {
+    const pattern = new RegExp(`^[ \\t]*${name}\\s*\\(\\)\\s*\\{[^}]*_harness_install_needed[^}]*\\}[ \\t]*\\n?`, 'gm');
+    const matches = next.match(pattern);
+    if (matches) {
+      next = next.replace(pattern, '');
+      removed = true;
+      count += matches.length;
+    }
+  }
+
+  next = next.replace(/^# If these stubs don't run, harness shell functions have not been installed yet\.\n?/m, '');
+  next = next.replace(/^# Harness install .*\n(?:# .*\n)*/m, match => match.includes('{{harness_root}}') ? '' : match);
+  next = next.replace(/\n{3,}/g, '\n\n');
+
+  return { content: next, removed, count };
+}
+
+function managedBlockHasStubs(content) {
+  if (!content.includes(BEGIN) || !content.includes(END)) return false;
+  const match = content.match(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`));
+  return Boolean(match && match[0].includes(STUB_HINT));
+}
+
 // Programmatic install entry (CLI re-implements this below to support exit codes).
 // Detects existing managed block / conflicting unmanaged definitions, then writes
 // or refreshes the block in each target rc file (.bashrc, .zshrc).
@@ -120,13 +156,19 @@ function install({ force = false } = {}) {
     try {
       let content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
       const hasBlock = content.includes(BEGIN) && content.includes(END);
-      const outsideBlock = hasBlock
+      const blockHasStubs = managedBlockHasStubs(content);
+      let outsideBlock = hasBlock
         ? content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`), '')
         : content;
       const allKnown = [...fnNames, ...LEGACY_FNS];
+      const stubInfo = hasBlock ? { removed: false, count: 0 } : stripStubBlock(content, allKnown);
+      if (!hasBlock && stubInfo.removed) {
+        content = stubInfo.content;
+        outsideBlock = content;
+      }
       const conflicts = allKnown.filter(name => new RegExp(`^\\s*${name}\\s*\\(\\)`, 'm').test(outsideBlock));
 
-      if (!force && hasBlock) {
+      if (!force && hasBlock && !blockHasStubs) {
         ok(`${shell}: managed block already present in ${file} — no changes`);
         skippedCount++;
         continue;
@@ -139,9 +181,12 @@ function install({ force = false } = {}) {
 
       const block = `${BEGIN}\n# Managed by Agent_Orchestrator/install-shell-functions.js — do not edit by hand.\n# Re-run with --force to refresh this block.\n${sourceContent.trimEnd()}\n${END}\n`;
       let next;
-      if (hasBlock && force) {
+      if (hasBlock && (force || blockHasStubs)) {
         next = content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}\\n?`), block);
       } else {
+        if (!hasBlock && stubInfo.removed) {
+          warn(`${shell}: removed ${stubInfo.count} harness stub function(s) from ${file} before installing managed block.`);
+        }
         if (force && conflicts.length > 0) {
           for (const name of conflicts) {
             content = content.replace(new RegExp(`^[ \\t]*${name}\\s*\\(\\)\\s*\\{[^}]*\\}[ \\t]*\\n?`, 'gm'), '');
@@ -226,15 +271,21 @@ for (const { shell, file } of targets) {
 
     // Check if our managed block is already present.
     const hasBlock = content.includes(BEGIN) && content.includes(END);
+    const blockHasStubs = managedBlockHasStubs(content);
 
     // Check if any of our function names are already defined outside our block.
-    const outsideBlock = hasBlock
+    let outsideBlock = hasBlock
       ? content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`), '')
       : content;
     const allKnown = [...fnNames, ...LEGACY_FNS];
+    const stubInfo = hasBlock ? { removed: false, count: 0 } : stripStubBlock(content, allKnown);
+    if (!hasBlock && stubInfo.removed) {
+      content = stubInfo.content;
+      outsideBlock = content;
+    }
     const conflicts = allKnown.filter(name => new RegExp(`^\\s*${name}\\s*\\(\\)`, 'm').test(outsideBlock));
 
-    if (!FORCE && hasBlock) {
+    if (!FORCE && hasBlock && !blockHasStubs) {
       ok(`${shell}: managed block already present in ${file} — no changes`);
       skippedCount++;
       continue;
@@ -248,9 +299,12 @@ for (const { shell, file } of targets) {
     const block = `${BEGIN}\n# Managed by Agent_Orchestrator/install-shell-functions.js — do not edit by hand.\n# Re-run with --force to refresh this block.\n${sourceContent.trimEnd()}\n${END}\n`;
 
     let next;
-    if (hasBlock && FORCE) {
+    if (hasBlock && (FORCE || blockHasStubs)) {
       next = content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}\\n?`), block);
     } else {
+      if (!hasBlock && stubInfo.removed) {
+        warn(`${shell}: removed ${stubInfo.count} harness stub function(s) from ${file} before installing managed block.`);
+      }
       // --force with unmanaged conflicts: strip each conflicting function definition line before appending.
       if (FORCE && conflicts.length > 0) {
         for (const name of conflicts) {
