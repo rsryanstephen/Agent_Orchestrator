@@ -131,12 +131,13 @@ test('rename-topic: updates all topic-ids entries in global-config.json', () => 
     'global-config.json must be persisted after update');
 });
 
-test('rename-topic: updates prompt-file in topic-config.json after rename (bug fix)', () => {
-  // Bug: prior to fix, prompt-file still pointed to <oldName>.md after rename.
-  assert.ok(/tc\['prompt-file'\] === `\$\{oldName\}\.md`/.test(RENAME_TOPIC_SRC),
-    'prompt-file guard must check for oldName.md before updating');
-  assert.ok(/tc\['prompt-file'\] = `\$\{newName\}\.md`/.test(RENAME_TOPIC_SRC),
-    'prompt-file must be updated to newName.md in topic-config.json');
+test('rename-topic: re-stamps prompt-file in topic-config.json after rename', () => {
+  // Bug: legacy topics could be missing prompt-file entirely, leaving the renamed
+  // topic without a canonical history-file pointer after rename.
+  assert.ok(/const desiredPromptFile = `\$\{newName\}\.md`/.test(RENAME_TOPIC_SRC),
+    'rename-topic must compute the canonical renamed history filename');
+  assert.ok(/tc\['prompt-file'\] = desiredPromptFile/.test(RENAME_TOPIC_SRC),
+    'prompt-file must be set to desiredPromptFile in topic-config.json');
   assert.ok(/configUtils\.writeConfig\(tcPath, tc\)/.test(RENAME_TOPIC_SRC),
     'topic-config.json must be persisted after prompt-file update');
 });
@@ -168,6 +169,38 @@ test('rename-topic: end-to-end prompt-file update via temp dirs', () => {
     const updated = configUtils.loadConfig(tcPath);
     assert.strictEqual(updated['prompt-file'], 'new-topic.md',
       'prompt-file must be updated to new-topic.md in topic-config.json');
+    assert.ok(fs.existsSync(histTo), 'new-topic.md history file must exist');
+    assert.ok(!fs.existsSync(histFrom), 'old-topic.md must be gone after rename');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('rename-topic: end-to-end prompt-file backfill via temp dirs', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-rename-'));
+  const topicFilesDir = path.join(tmp, 'topic_files');
+  const newDir = path.join(topicFilesDir, 'new-topic');
+  try {
+    fs.mkdirSync(newDir, { recursive: true });
+    fs.writeFileSync(path.join(newDir, 'old-topic.md'), '# old-topic\n\n## User Prompt\n', 'utf8');
+    const tc = { '// README': 'test', 'topic-id': '1' };
+    fs.writeFileSync(path.join(newDir, 'topic-config.json'), JSON.stringify(tc, null, 2), 'utf8');
+
+    const histFrom = path.join(newDir, 'old-topic.md');
+    const histTo   = path.join(newDir, 'new-topic.md');
+    if (fs.existsSync(histFrom)) fs.renameSync(histFrom, histTo);
+
+    const tcPath = path.join(newDir, 'topic-config.json');
+    const loaded = configUtils.loadConfig(tcPath);
+    const desiredPromptFile = 'new-topic.md';
+    if (loaded['prompt-file'] !== desiredPromptFile) {
+      loaded['prompt-file'] = desiredPromptFile;
+      configUtils.writeConfig(tcPath, loaded);
+    }
+
+    const updated = configUtils.loadConfig(tcPath);
+    assert.strictEqual(updated['prompt-file'], 'new-topic.md',
+      'missing prompt-file must be backfilled to new-topic.md in topic-config.json');
     assert.ok(fs.existsSync(histTo), 'new-topic.md history file must exist');
     assert.ok(!fs.existsSync(histFrom), 'old-topic.md must be gone after rename');
   } finally {

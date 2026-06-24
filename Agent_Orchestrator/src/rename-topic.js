@@ -78,15 +78,22 @@ for (const [id, name] of Object.entries(topicIds)) {
 configUtils.writeConfig(CONFIG, config);
 log(`global-config.json updated.`);
 
-// Update prompt-file in topic-config.json to reflect the renamed history file.
+// Re-stamp the canonical history filename after rename so legacy topics that
+// predate `prompt-file` still resolve to the renamed markdown file.
 const tcPath = path.join(newDir, configUtils.TOPIC_CONFIG_FILENAME);
 if (fs.existsSync(tcPath)) {
   try {
     const tc = configUtils.loadConfig(tcPath);
-    if (tc['prompt-file'] === `${oldName}.md`) {
-      tc['prompt-file'] = `${newName}.md`;
+    const desiredPromptFile = `${newName}.md`;
+    const previousPromptFile = tc['prompt-file'];
+    if (previousPromptFile !== desiredPromptFile) {
+      tc['prompt-file'] = desiredPromptFile;
       configUtils.writeConfig(tcPath, tc);
-      log(`Updated prompt-file in ${configUtils.TOPIC_CONFIG_FILENAME}: "${oldName}.md" → "${newName}.md"`);
+      if (previousPromptFile) {
+        log(`Updated prompt-file in ${configUtils.TOPIC_CONFIG_FILENAME}: "${previousPromptFile}" → "${desiredPromptFile}"`);
+      } else {
+        log(`Backfilled prompt-file in ${configUtils.TOPIC_CONFIG_FILENAME}: "${desiredPromptFile}"`);
+      }
     }
   } catch (e) {
     log(`Warning: could not update prompt-file in ${configUtils.TOPIC_CONFIG_FILENAME}: ${e.message}`);
