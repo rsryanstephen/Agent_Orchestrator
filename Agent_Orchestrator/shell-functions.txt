@@ -15,7 +15,7 @@ hrmtopic()       { \node {{HARNESS_ROOT}}/src/remove-topic.js "$1"; }       # hr
 #   hrun 2-caf        # topic 2, code-assess-fix
 #   hrun caf          # last-touched topic, code-assess-fix
 #   hrun 1-c 2-caf    # topic 1 coding AND topic 2 code-assess-fix in parallel
-# Shorthand: p|c|a|f|af|pc|caf|all|pcaf|cont
+# Shorthand: p|c|a|ac|f|af|pc|caf|all|pcaf|cont
 hrun()           { \node {{HARNESS_ROOT}}/src/run-parallel.js "$@"; }
 
 # hresume [topic|id|all] — manually trigger auto-resume for topics in the wake queue
@@ -34,6 +34,7 @@ hqregen()        { \node {{HARNESS_ROOT}}/src/regenerate-queue.js "$@"; }
 hupdate-models()   { \node {{HARNESS_ROOT}}/src/update-models-reference.js; }  # hupdate-models
 hfetch-models()    { \node {{HARNESS_ROOT}}/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
 hprobe()           { \node {{HARNESS_ROOT}}/src/run-agent.js --probe; }  # hprobe — checks provider auth
+hsync()            { \node {{HARNESS_ROOT}}/src/sync-user-native-config.js; }  # hsync — copy Code/User/user_native_config.md into all provider-native config files listed in Code/User/global_config_per_provider.md
 
 # Harness install (idempotent — adds these functions to your rc file if missing)
 # \node {{HARNESS_ROOT}}/src/install-shell-functions.js "$@"; [--force]
