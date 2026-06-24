@@ -522,6 +522,124 @@ test('agents-md-generator: absent source files produce empty AGENTS.md (no crash
   }
 });
 
+test('agents-md-generator: syncUserNativeConfig writes all target files from per-provider doc', () => {
+  const tmpDir = makeTmpDir();
+  const sourceFilePath = path.join(tmpDir, 'user_native_config.md');
+  const targetsDocPath = path.join(tmpDir, 'global_config_per_provider.md');
+  const claudePath = path.join(tmpDir, '.claude', 'CLAUDE.md');
+  const vscodeInstructionsPath = path.join(tmpDir, 'Code', 'User', 'prompts', 'instructions', 'copilot-chat-always-on.instructions.md');
+  const geminiPath = path.join(tmpDir, '.gemini', 'GEMINI.md');
+  try {
+    fs.writeFileSync(sourceFilePath, '# Copilot Rules\nBe terse.\n', 'utf8');
+    fs.writeFileSync(
+      targetsDocPath,
+      `Claude Code: \`${claudePath}\`\nCopilot Chat: \`${vscodeInstructionsPath}\`\nGemini: \`${geminiPath}\`\n`,
+      'utf8'
+    );
+    const result = generator.syncUserNativeConfig({ sourceFilePath, targetsDocPath });
+    const syncedClaude = fs.readFileSync(claudePath, 'utf8');
+    const syncedInstructions = fs.readFileSync(vscodeInstructionsPath, 'utf8');
+    const syncedGemini = fs.readFileSync(geminiPath, 'utf8');
+    assert.ok(result, 'sync result must be returned');
+    assert.strictEqual(result.writtenFiles.length, 3, 'must write every target in per-provider doc');
+    assert.ok(syncedClaude.startsWith('<!-- Synced by hsync for Claude Code.'), 'claude file must get Claude fronting');
+    assert.ok(syncedClaude.includes('Be terse.'), 'claude file must include source content');
+    assert.ok(syncedInstructions.includes('applyTo: "**"'), 'instructions file must auto-apply to all files');
+    assert.ok(syncedInstructions.includes('Synced by hsync for VS Code Copilot Chat.'), 'instructions file must get VS Code fronting');
+    assert.ok(syncedInstructions.includes('Be terse.'), 'instructions file must include source content');
+    assert.ok(syncedGemini.startsWith('<!-- Synced by hsync for Gemini.'), 'gemini file must get Gemini fronting');
+    assert.ok(syncedGemini.includes('Be terse.'), 'gemini file must include source content');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('agents-md-generator: syncUserNativeConfig overwrites existing target text on re-run', () => {
+  const tmpDir = makeTmpDir();
+  const sourceFilePath = path.join(tmpDir, 'user_native_config.md');
+  const targetsDocPath = path.join(tmpDir, 'global_config_per_provider.md');
+  const claudePath = path.join(tmpDir, '.claude', 'CLAUDE.md');
+  const vscodeInstructionsPath = path.join(tmpDir, 'Code', 'User', 'prompts', 'instructions', 'copilot-chat-always-on.instructions.md');
+  try {
+    fs.writeFileSync(
+      targetsDocPath,
+      `Claude Code: \`${claudePath}\`\nCopilot Chat: \`${vscodeInstructionsPath}\`\n`,
+      'utf8'
+    );
+    fs.writeFileSync(sourceFilePath, '# Native Rules\nFirst version.\n', 'utf8');
+    generator.syncUserNativeConfig({ sourceFilePath, targetsDocPath });
+
+    fs.writeFileSync(sourceFilePath, '# Native Rules\nSecond version.\n', 'utf8');
+    const result = generator.syncUserNativeConfig({ sourceFilePath, targetsDocPath });
+    const syncedClaude = fs.readFileSync(claudePath, 'utf8');
+    const syncedInstructions = fs.readFileSync(vscodeInstructionsPath, 'utf8');
+
+    assert.strictEqual(result.writtenFiles.length, 2, 'must rewrite both listed targets');
+    assert.ok(syncedClaude.includes('Second version.'), 'claude file must refresh with new source content');
+    assert.ok(!syncedClaude.includes('First version.'), 'claude file must drop stale content');
+    assert.ok(syncedInstructions.includes('Second version.'), 'instructions file must be refreshed too');
+    assert.ok(!syncedInstructions.includes('First version.'), 'instructions file must drop stale content');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('agents-md-generator: syncUserNativeConfig strips old VS Code instruction frontmatter from canonical source before writing Claude/Gemini', () => {
+  const tmpDir = makeTmpDir();
+  const sourceFilePath = path.join(tmpDir, 'user_native_config.md');
+  const targetsDocPath = path.join(tmpDir, 'global_config_per_provider.md');
+  const claudePath = path.join(tmpDir, '.claude', 'CLAUDE.md');
+  const geminiPath = path.join(tmpDir, '.gemini', 'GEMINI.md');
+  try {
+    fs.writeFileSync(
+      sourceFilePath,
+      `---\ndescription: "Always-on defaults synced from ~/.copilot/copilot-instructions.md for all chats."\napplyTo: "**"\n---\n<!-- >>> Agent_Orchestrator Copilot instructions sync >>> -->\n<!-- Managed by Agent_Orchestrator/src/sync-vscode-copilot-instructions.js. Source: ~/.copilot/copilot-instructions.md -->\n## Caveman Mode\nBody text.\n<!-- <<< Agent_Orchestrator Copilot instructions sync <<< -->\n`,
+      'utf8'
+    );
+    fs.writeFileSync(
+      targetsDocPath,
+      `Claude Code: \`${claudePath}\`\nGemini: \`${geminiPath}\`\n`,
+      'utf8'
+    );
+
+    generator.syncUserNativeConfig({ sourceFilePath, targetsDocPath });
+    const syncedClaude = fs.readFileSync(claudePath, 'utf8');
+    const syncedGemini = fs.readFileSync(geminiPath, 'utf8');
+
+    assert.ok(!syncedClaude.includes('applyTo:'), 'claude file must not inherit VS Code frontmatter from source');
+    assert.ok(!syncedGemini.includes('applyTo:'), 'gemini file must not inherit VS Code frontmatter from source');
+    assert.ok(syncedClaude.includes('## Caveman Mode'), 'claude file must keep normalized body content');
+    assert.ok(syncedGemini.includes('Body text.'), 'gemini file must keep normalized body content');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('agents-md-generator: syncUserNativeConfig removes legacy VS Code User AGENTS.md from old sync flow', () => {
+  const tmpDir = makeTmpDir();
+  const sourceFilePath = path.join(tmpDir, 'user_native_config.md');
+  const targetsDocPath = path.join(tmpDir, 'global_config_per_provider.md');
+  const claudePath = path.join(tmpDir, '.claude', 'CLAUDE.md');
+  const legacyAgentsPath = path.join(tmpDir, 'Code', 'User', 'AGENTS.md');
+  try {
+    fs.mkdirSync(path.dirname(legacyAgentsPath), { recursive: true });
+    fs.writeFileSync(sourceFilePath, '## Native Rules\nBody.\n', 'utf8');
+    fs.writeFileSync(targetsDocPath, `Claude Code: \`${claudePath}\`\n`, 'utf8');
+    fs.writeFileSync(
+      legacyAgentsPath,
+      `---\ndescription: "Always-on defaults copied from ~/.copilot/copilot-instructions.md for all chats."\napplyTo: "**"\n---\n## Legacy\n`,
+      'utf8'
+    );
+
+    const result = generator.syncUserNativeConfig({ sourceFilePath, targetsDocPath, agentsPath: legacyAgentsPath });
+
+    assert.strictEqual(result.removedLegacyAgentsPath, legacyAgentsPath, 'legacy AGENTS path must be reported when removed');
+    assert.ok(!fs.existsSync(legacyAgentsPath), 'legacy AGENTS.md must be removed');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
 // ── injectSkillsInline ─────────────────────────────────────────────────────────
 
 test('injectSkillsInline: prepends skill content when skillsRuntime=false', () => {

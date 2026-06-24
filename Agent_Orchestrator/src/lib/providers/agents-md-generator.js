@@ -10,6 +10,9 @@ const os = require('os');
 const path = require('path');
 
 const BAK_SUFFIX = '.harness-bak';
+const USER_NATIVE_CONFIG_FILENAME = 'user_native_config.md';
+const GLOBAL_CONFIG_PER_PROVIDER_FILENAME = 'global_config_per_provider.md';
+const LEGACY_GLOBAL_CONFIG_PER_PROVIDER_FILENAME = 'global config per provider.md';
 
 let _registered = false;
 const _teardownCallbacks = [];
@@ -177,6 +180,158 @@ function _resolveVSCodeGlobalUserDir() {
   return path.join(os.homedir(), '.config', 'Code', 'User');
 }
 
+function _resolveVSCodeUserNativeConfigPath() {
+  return path.join(_resolveVSCodeGlobalUserDir(), USER_NATIVE_CONFIG_FILENAME);
+}
+
+function _resolveGlobalConfigPerProviderPath() {
+  return path.join(_resolveVSCodeGlobalUserDir(), GLOBAL_CONFIG_PER_PROVIDER_FILENAME);
+}
+
+function _expandHomePath(p) {
+  if (!p) return p;
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function _renderClaudeNativeConfigFile(content) {
+  return `<!-- Synced by hsync for Claude Code. Source: user_native_config.md -->\n\n${content.trimEnd()}\n`;
+}
+
+function _renderCopilotCliNativeConfigFile(content) {
+  return `<!-- Synced by hsync for Copilot CLI. Source: user_native_config.md -->\n\n${content.trimEnd()}\n`;
+}
+
+function _renderGeminiNativeConfigFile(content) {
+  return `<!-- Synced by hsync for Gemini. Source: user_native_config.md -->\n\n${content.trimEnd()}\n`;
+}
+
+function _renderVSCodeInstructionsFile(content) {
+  return `---
+description: "Always-on defaults synced from user_native_config.md for all chats."
+applyTo: "**"
+---
+<!-- Synced by hsync for VS Code Copilot Chat. Source: user_native_config.md -->
+
+${content.trimEnd()}
+`;
+}
+
+function _normalizeUserNativeConfigBody(raw) {
+  let text = String(raw || '').trim();
+  if (/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.test(text)) {
+    const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (frontmatter && /(?:^|\r?\n)(?:description|applyTo)\s*:/m.test(frontmatter[1])) {
+      text = text.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim();
+    }
+  }
+  text = text
+    .replace(/^<!-- >>> Agent_Orchestrator Copilot instructions sync >>> ?-->[\r\n]*/i, '')
+    .replace(/^<!-- Managed by Agent_Orchestrator\/src\/sync-vscode-copilot-instructions\.js\.[\s\S]*?-->[\r\n]*/i, '')
+    .replace(/[\r\n]*<!-- <<< Agent_Orchestrator Copilot instructions sync <<< -->$/i, '')
+    .trim();
+  return text;
+}
+
+function _parseTargetEntriesFromMarkdown(docPath) {
+  const raw = fs.readFileSync(docPath, 'utf8');
+  const targets = [];
+  const seen = new Set();
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^(.*?)`([^`\r\n]+)`/);
+    if (!match) continue;
+    const label = match[1]
+      .replace(/^[-*]\s*/, '')
+      .replace(/^\d+\.\s*/, '')
+      .replace(/:\s*$/, '')
+      .trim();
+    const expanded = _expandHomePath(match[2].trim());
+    if (!expanded || seen.has(expanded)) continue;
+    seen.add(expanded);
+    targets.push({ label, path: expanded });
+  }
+  return targets;
+}
+
+function _classifyNativeConfigTarget(entry) {
+  const label = String(entry && entry.label || '').toLowerCase();
+  const targetPath = String(entry && entry.path || '');
+  const base = path.basename(targetPath).toLowerCase();
+  if (base.endsWith('.instructions.md') || label.includes('copilot chat') || label.includes('vscode')) return 'vscode-instructions';
+  if (base === 'claude.md' || label.includes('claude')) return 'claude';
+  if (base === 'gemini.md' || label.includes('gemini')) return 'gemini';
+  if (base === 'copilot-instructions.md' || label.includes('copilot cli')) return 'copilot-cli';
+  return 'plain';
+}
+
+function _renderNativeConfigTarget(entry, content) {
+  switch (_classifyNativeConfigTarget(entry)) {
+    case 'vscode-instructions': return _renderVSCodeInstructionsFile(content);
+    case 'claude': return _renderClaudeNativeConfigFile(content);
+    case 'gemini': return _renderGeminiNativeConfigFile(content);
+    case 'copilot-cli': return _renderCopilotCliNativeConfigFile(content);
+    default: return `${content.trimEnd()}\n`;
+  }
+}
+
+function _removeLegacyVSCodeGlobalAgentsFile(opts) {
+  const agentsPath = (opts && opts.agentsPath)
+    ? opts.agentsPath
+    : path.join(_resolveVSCodeGlobalUserDir(), 'AGENTS.md');
+  if (!fs.existsSync(agentsPath)) return null;
+  const raw = fs.readFileSync(agentsPath, 'utf8');
+  const looksLikeLegacySync =
+    raw.includes('Managed by Agent_Orchestrator/src/sync-vscode-copilot-instructions.js') ||
+    raw.includes('Always-on defaults copied from ~/.copilot/copilot-instructions.md for all chats.') ||
+    raw.includes('Always-on defaults synced from ~/.copilot/copilot-instructions.md for all chats.');
+  if (!looksLikeLegacySync) return null;
+  fs.unlinkSync(agentsPath);
+  return agentsPath;
+}
+
+function syncUserNativeConfig(opts) {
+  const sourceFilePath = (opts && opts.sourceFilePath)
+    ? opts.sourceFilePath
+    : _resolveVSCodeUserNativeConfigPath();
+  const defaultTargetsDocPath = _resolveGlobalConfigPerProviderPath();
+  const legacyTargetsDocPath = path.join(_resolveVSCodeGlobalUserDir(), LEGACY_GLOBAL_CONFIG_PER_PROVIDER_FILENAME);
+  const targetsDocPath = (opts && opts.targetsDocPath)
+    ? opts.targetsDocPath
+    : (fs.existsSync(defaultTargetsDocPath) ? defaultTargetsDocPath : legacyTargetsDocPath);
+
+  if (!fs.existsSync(sourceFilePath)) {
+    throw new Error(`User native config source not found: ${sourceFilePath}`);
+  }
+  if (!fs.existsSync(targetsDocPath)) {
+    throw new Error(`Per-provider targets doc not found: ${targetsDocPath}`);
+  }
+
+  const content = _normalizeUserNativeConfigBody(fs.readFileSync(sourceFilePath, 'utf8'));
+  if (!content) {
+    throw new Error(`User native config source is empty: ${sourceFilePath}`);
+  }
+
+  const targetEntries = (opts && Array.isArray(opts.targetPaths) && opts.targetPaths.length > 0)
+    ? opts.targetPaths.map(targetPath => ({ label: '', path: _expandHomePath(targetPath) }))
+    : _parseTargetEntriesFromMarkdown(targetsDocPath);
+  if (targetEntries.length === 0) {
+    throw new Error(`No target file paths found in ${targetsDocPath}`);
+  }
+
+  const writtenFiles = [];
+  for (const entry of targetEntries) {
+    const targetPath = entry && entry.path;
+    if (!targetPath) continue;
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const output = _renderNativeConfigTarget(entry, content);
+    fs.writeFileSync(targetPath, output, 'utf8');
+    writtenFiles.push(targetPath);
+  }
+  const removedLegacyAgentsPath = _removeLegacyVSCodeGlobalAgentsFile(opts);
+  return { sourceFilePath, targetsDocPath, writtenFiles, removedLegacyAgentsPath };
+}
+
 /**
  * Backs up and blanks two Copilot double-injection sources before a harness spawn:
  *   1. ~/.copilot/copilot-instructions.md  (standalone Copilot CLI global instructions)
@@ -238,4 +393,12 @@ function suppressClaudeInstructions(opts) {
   return t1;
 }
 
-module.exports = { setup, teardown, buildAgentsMdContent, suppressCopilotInstructions, suppressGeminiInstructions, suppressClaudeInstructions };
+module.exports = {
+  setup,
+  teardown,
+  buildAgentsMdContent,
+  suppressCopilotInstructions,
+  suppressGeminiInstructions,
+  suppressClaudeInstructions,
+  syncUserNativeConfig,
+};
