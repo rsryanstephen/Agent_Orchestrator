@@ -10,16 +10,21 @@
    ## Coding Agent Response
    ## Assessment Agent Response
    ## Coding Agent Response (Remediation)
+   ## Ask Agent Response
  A single "## User Prompt" suffix is appended at the very end of a run (or pipeline).
 
  planning               – produces an implementation plan, appends ## Planning Agent Response
  coding                 – executes the task, appends ## Coding Agent Response
  assessment             – reviews changes, appends ## Assessment Agent Response
  fix                    – reads latest ## Assessment Agent Response, fixes code, appends ## Coding Agent Response (Remediation)
- assess-fix             – assessment → fix
- plan-code              – planning → coding (coding executes the plan output)
- code-assess-fix        – coding → assessment → fix
+ ask                    – answers question using codebase context (read-only), appends ## Ask Agent Response
+ assess-fix   (af)      – assessment → fix
+ plan-code    (pc)      – planning → coding (coding executes the plan output)
+ code-assess-fix (caf)  – coding → assessment → fix
+ ask-code     (ac)      – ask → coding (answers question then executes coding phase)
  all                    – planning → coding → assessment → fix
+
+ Shorthands: p=planning, c=coding, a=ask, ac=ask-code, f=fix, af=assess-fix, pc=plan-code, caf=code-assess-fix
 
 Shell helpers (see README.md) delegate to this script.
 **/
@@ -54,9 +59,11 @@ const { getAdvisorFlags } = require('./lib/advisor-flags');
 
 const ROOT = path.join(__dirname, '..', '..');
 const HARNESS = path.join(__dirname, '..');
-const VALID_ROLES = ['planning', 'coding', 'assessment', 'fix', 'assess-fix', 'plan-code', 'code-assess-fix', 'all', 'continue'];
+// 'ask' answers questions without modifying files; 'ask-code' asks then runs coding phase.
+const VALID_ROLES = ['planning', 'coding', 'assessment', 'fix', 'assess-fix', 'plan-code', 'code-assess-fix', 'all', 'continue', 'ask', 'ask-code'];
 
 // Pipeline phases per command (used by dispatch + state-driven resume + continue).
+// ask: answers question only; ask-code: answers question then runs coding phase.
 const PIPELINES = {
   planning: ['planning'],
   coding: ['coding'],
@@ -66,6 +73,8 @@ const PIPELINES = {
   'plan-code': ['planning', 'coding'],
   'code-assess-fix': ['coding', 'assessment', 'fix'],
   'all': ['planning', 'coding', 'assessment', 'fix'],
+  ask: ['ask'],
+  'ask-code': ['ask', 'coding'],
 };
 // Updated to claude-opus-4-8 per models-reference.md refresh (4-7 is superseded).
 const LATEST_OPUS = 'claude-opus-4-8';
@@ -1795,6 +1804,8 @@ let [,, topicArg, roleArg] = process.argv;
 // the flag — which lands in argv[3]/`roleArg` when invoked as `<topic> --dump-prompt`
 // — is stripped before role validation (line ~1875) would reject it as an invalid
 // role. Topic still resolves normally so the dump reflects the live topic config.
+// USAGE: `node run-agent.js <topic> --dump-prompt`. The topic MUST be argv[2];
+// there is no topicless form — the dump always reflects a resolved topic's config.
 const dumpPrompt = process.argv.includes('--dump-prompt');
 if (dumpPrompt && roleArg === '--dump-prompt') roleArg = undefined;
 // =========================================================================
@@ -2413,6 +2424,9 @@ const baseSystemPrompts = {
     "You are a pragmatic Senior .NET Engineer. Focus on code implementation, refactoring, and bug fixing. Check existing files before making assumptions." + POST_EDIT_VALIDATION_CLAUSE,
   assessment: (config.systemPrompts && config.systemPrompts.assessment) ||
     "You are the assessment agent. Assess coding agent performance, check prompt requirements, find pitfalls, and anticipate bugs/regressions. Compare recent git changes against the latest prompt.",
+  // ask: read-only Q&A agent — answers questions using codebase context, never modifies files.
+  ask: (config.systemPrompts && config.systemPrompts.ask) ||
+    "You are an expert Q&A agent. Answer the user's question thoroughly and accurately using codebase context. Do not modify any files.",
 };
 
 function _activeProviderId() {
@@ -2437,6 +2451,17 @@ function getSystemPromptAdditions(role) {
 }
 
 function buildSystemPrompt(role, { codingNoPlanning = false } = {}) {
+  // ask role: read-only Q&A — apply shared clauses but skip all code-review/assessment-specific ones.
+  if (role === 'ask') {
+    let prompt = baseSystemPrompts.ask;
+    if (useInterrogate) prompt += downstreamInterrogateClause;
+    prompt += cavemanClause || proseNeutralisationClause;
+    prompt += karpathyClause || karpathyNeutralisationClause;
+    prompt += outputFormattingMandateClause;
+    if (advisorFlags[role]) prompt += claudeAdvisorClause;
+    prompt += getSystemPromptAdditions(role);
+    return prompt;
+  }
   let prompt = baseSystemPrompts[role];
   if (role === 'planning') prompt += parallelPlanningClause;
   if (role === 'coding') prompt += regressionClause;
@@ -2489,6 +2514,8 @@ const systemPrompts = {
   planning: buildSystemPrompt('planning'),
   coding: buildSystemPrompt('coding'),
   assessment: buildSystemPrompt('assessment'),
+  // ask prompt built via the early-return branch in buildSystemPrompt.
+  ask: buildSystemPrompt('ask'),
 };
 
 // `--dump-prompt` handler: emit each role's fully-assembled system prompt (base +
@@ -2497,7 +2524,7 @@ const systemPrompts = {
 // `topicConfig`/`config` gating. Lets a grep deterministically prove a clause
 // (e.g. `## Caveman Mode`) actually lands in the prompt.
 if (dumpPrompt) {
-  for (const role of ['planning', 'coding', 'assessment']) {
+  for (const role of ['planning', 'coding', 'assessment', 'ask']) {
     process.stdout.write(`\n===== DUMP-PROMPT role=${role} =====\n`);
     process.stdout.write(buildSystemPrompt(role) + getSkillsSuffix() + '\n');
   }
@@ -2796,6 +2823,30 @@ async function runAssessment(noSuffix = false, { parallelTaskCount = 0 } = {}) {
   const footer = await buildUsageFooter(model, usage, costUsd, fallbackNote, effortNote, { stopReason, continuations });
   if (footer) process.stdout.write(footer + '\n');
   appendToFile(historyPath, `## ${ROLE_HEADER.assessment}`, text + footer, { appendUserPromptSuffix: !noSuffix });
+}
+
+// runAsk: read-only Q&A phase. Answers the user's question using codebase context.
+// No git diff injection — ask is not a code-review phase.
+async function runAsk(noSuffix = false) {
+  setCurrentRole('ask');
+  log('--- Phase: ask ---');
+  const context = parseConversationContext(historyPath) ||
+    "Answer the user's question using the codebase context provided.";
+  const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
+  const payload = buildPayload(
+    globalRules,
+    historySelfLookup + systemPrompts.ask + getSkillsSuffix(),
+    `Answer the question below thoroughly and accurately using codebase context. Do not modify any files.${actionVerbositySuffix()}`,
+    context,
+    ctxSection
+  );
+  const _snap = snapshotHistorySize();
+  const { text, model, usage, costUsd, fallbackNote, effortNote, stopReason, continuations } = await runClaude(payload, { label: 'ask-agent', role: 'ask' });
+  truncateHistoryIfAgentWrote(_snap, 'ask-agent');
+  const footer = await buildUsageFooter(model, usage, costUsd, fallbackNote, effortNote, { stopReason, continuations });
+  if (footer) process.stdout.write(footer + '\n');
+  appendToFile(historyPath, `## ${ROLE_HEADER.ask}`, text + footer, { appendUserPromptSuffix: !noSuffix });
 }
 
 async function runFleet({ kind, subtasks, taskFn }) {
@@ -3834,6 +3885,9 @@ async function runPhase(phaseName, { isFinal, hasPlanning, subsFromPrompt, isRer
       if (subsFromPrompt && getParallelAssessmentAgents()) await runAssessmentParallel(subsFromPrompt, noSuffix);
       else await runAssessment(noSuffix, { parallelTaskCount: subsFromPrompt ? subsFromPrompt.length : 0 });
       break;
+    case 'ask':
+      await runAsk(noSuffix);
+      break;
     case 'fix':
       stripTrailingUserPrompt(historyPath);
       if (subsFromPrompt && getParallelAssessmentAgents()) await runCodingAssessmentParallel(subsFromPrompt, noSuffix);
@@ -4246,10 +4300,15 @@ const promptQueue = require('./prompt-queue');
 // the module.
 function topicDirPath() { return path.dirname(historyPath); }
 
+// pipeline artefact: in-process queue drain uses CMD_MAP compiled at process start;
+// changes to CMD_MAP by a coding agent mid-run are NOT visible to subsequent drain
+// cycles — restart hrun after harness changes that modify CMD_MAP.
 // Map shorthand -> pipeline key understood by runPipeline / role dispatch.
 function resolvePipelineFromShorthand(shorthand) {
+  // a: 'ask' (was 'assessment' — use 'af' for assess+fix, 'assessment' full name still works).
+  // ac: ask then coding; af: assess+fix (unchanged).
   const CMD_MAP = {
-    p: 'planning', c: 'coding', a: 'assessment', f: 'fix',
+    p: 'planning', c: 'coding', a: 'ask', ac: 'ask-code', f: 'fix',
     af: 'assess-fix', pc: 'plan-code', caf: 'code-assess-fix',
     all: 'all', pcaf: 'all', cont: 'continue',
   };
@@ -4258,7 +4317,9 @@ function resolvePipelineFromShorthand(shorthand) {
 
 const _normalizeHistory = require('./normalize-history');
 
-function injectQueuedPromptIntoHistory(body) {
+// pipelineShorthand (optional): when present, appended to the history header so
+// the reader can see which pipeline was requested alongside the queued prompt.
+function injectQueuedPromptIntoHistory(body, pipelineShorthand) {
   // Single unified branch: strip EVERY trailing empty `## User Prompt[...]`
   // placeholder (tagged or untagged) — there may be more than one stacked due
   // to a prior phase running both `appendUserPromptSuffix` and
@@ -4274,7 +4335,8 @@ function injectQueuedPromptIntoHistory(body) {
     const tailHex = tailBuf.toString('hex');
     const tailRaw = tailBuf.toString('utf8');
     const { collapsed } = _normalizeHistory.stripAllTrailingEmptyPlaceholders(txt);
-    const next = _normalizeHistory.buildQueueInjectedContent(txt, body);
+    // Pass pipelineShorthand so buildQueueInjectedContent can annotate the header.
+    const next = _normalizeHistory.buildQueueInjectedContent(txt, body, pipelineShorthand);
     log(`queue-inject: unified branch — collapsed ${collapsed} trailing empty \`## User Prompt\` placeholder(s); appended tagged section.`);
     // Single unified debug entry; `branch` retains legacy `reuse`/`fresh-append`
     // string for telemetry continuity, and `unified:true` flags the new path.
@@ -4656,7 +4718,8 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
     // Capture raw block text BEFORE inject so we can re-queue on failure
     // (preserves header line + body verbatim — `parseBlock` exposes `.raw`).
     const rawBlock = block.raw;
-    injectQueuedPromptIntoHistory(block.body);
+    // Pass block.pipeline so the history header records which shorthand was used.
+    injectQueuedPromptIntoHistory(block.body, block.pipeline);
     // Audible cue: a new prompt was just fetched from the queue and injected
     // into history. Uses the distinct, innocuous `playQueueFetchSound` (NOT
     // the clarifying/error chime) so the user can tell "new work started"

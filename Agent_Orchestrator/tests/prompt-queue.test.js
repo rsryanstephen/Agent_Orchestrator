@@ -428,7 +428,7 @@ test('in-process continuation does NOT call stripTrailingUserPrompt after inject
   assert.ok(!/stripTrailingUserPrompt\(historyPath\);\s*\/\/\s*consume the just-injected/.test(body),
     'misleading no-op stripTrailingUserPrompt call (with "consume the just-injected" comment) must be removed');
   // Confirm the in-process call happens directly after the inject + log statements.
-  assert.ok(/injectQueuedPromptIntoHistory\(block\.body\)[\s\S]*?await runPipeline\(pipelineKey/.test(body),
+  assert.ok(/injectQueuedPromptIntoHistory\(block\.body[^)]*\)[\s\S]*?await runPipeline\(pipelineKey/.test(body),
     'runPipeline must be invoked directly after injectQueuedPromptIntoHistory (no strip in between)');
 });
 

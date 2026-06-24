@@ -8,6 +8,7 @@ const ROLE_HEADER = {
   coding:     'Coding Agent Response',
   assessment: 'Assessment Agent Response',
   fix:        'Coding Agent Response (Remediation)',
+  ask:        'Ask Agent Response', // Q&A mode — answers without modifying files
 };
 
 // Header label written above each agent's response. When >1 sibling agents run

@@ -88,10 +88,13 @@ function normalizeTrailingPromptStack(filePath) {
 
 // Pure transformation used by injectQueuedPromptIntoHistory: strips all
 // trailing empty placeholders then appends exactly one tagged queue section.
+// pipelineShorthand (optional) is appended to the header so history records which
+// pipeline was requested alongside the queued prompt.
 // Exported so tests can exercise the real inject logic without module-level state.
-function buildQueueInjectedContent(text, body) {
+function buildQueueInjectedContent(text, body, pipelineShorthand) {
   const { text: stripped } = stripAllTrailingEmptyPlaceholders(text);
-  return stripped.replace(/\s*$/, '') + `\n\n---\n\n## User Prompt (From the Queue)\n\n${body}\n`;
+  const tag = pipelineShorthand ? `From the Queue | ${pipelineShorthand}` : 'From the Queue';
+  return stripped.replace(/\s*$/, '') + `\n\n---\n\n## User Prompt (${tag})\n\n${body}\n`;
 }
 
 module.exports = {
