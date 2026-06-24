@@ -4,7 +4,7 @@
 hedit()          { code {{HARNESS_ROOT}}/..; }  # hedit — open the harness repo in VS Code
 
 # Topic management
-hstartt()        { \node {{HARNESS_ROOT}}/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
+hstartt()        { \node {{HARNESS_ROOT}}/src/start-topic.js "$1" "$2" "$3"; }   # hstartt <topic> [id] [root-repo] — root-repo: abs or relative (resolved vs invocation dir), defaults to cwd; written to topic-config.json as "root-repo"; working/scan root for all agents
 hsett()          { \node {{HARNESS_ROOT}}/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
 hrentopic()      { \node {{HARNESS_ROOT}}/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
 hrmtopic()       { \node {{HARNESS_ROOT}}/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>

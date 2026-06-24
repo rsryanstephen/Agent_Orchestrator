@@ -37,9 +37,9 @@ function makeFn(mockRoot, mockHarness) {
 
 // ── Source-level checks ───────────────────────────────────────────────────────
 
-test('signature accepts agentCwd parameter', () => {
-  assert.ok(/function buildContextSection\(contextEntries,\s*activeHistoryRel\s*=\s*null,\s*agentCwd\s*=\s*null\)/.test(runAgentSrc),
-    'agentCwd param missing from signature');
+test('signature accepts agentCwd + baseRoot parameters', () => {
+  assert.ok(/function buildContextSection\(contextEntries,\s*activeHistoryRel\s*=\s*null,\s*agentCwd\s*=\s*null,\s*baseRoot\s*=\s*ROOT\)/.test(runAgentSrc),
+    'agentCwd/baseRoot params missing from signature');
 });
 
 test('harness-location hint emitted', () => {
@@ -48,7 +48,7 @@ test('harness-location hint emitted', () => {
 });
 
 test('useAbsolute logic present', () => {
-  assert.ok(/path\.resolve\(agentCwd\).*!==.*path\.resolve\(ROOT\)/.test(runAgentSrc), 'useAbsolute comparison absent');
+  assert.ok(/path\.resolve\(agentCwd\).*!==.*path\.resolve\(baseRoot\)/.test(runAgentSrc), 'useAbsolute comparison absent');
 });
 
 test('directory expansion: mtime sort + 20-file cap present', () => {
@@ -57,11 +57,11 @@ test('directory expansion: mtime sort + 20-file cap present', () => {
   assert.ok(/\(directory\)/.test(runAgentSrc), '(directory) annotation absent');
 });
 
-test('all callers pass agentCwd (process.cwd())', () => {
+test('all callers pass repoRoot as agentCwd + baseRoot', () => {
   const lines = runAgentSrc.split('\n');
   const callSites = lines.filter(l => l.includes('buildContextSection(') && !l.includes('function buildContextSection('));
   for (const l of callSites) {
-    assert.ok(l.includes('process.cwd()'), `caller missing process.cwd(): ${l.trim()}`);
+    assert.ok(/repoRoot,\s*repoRoot\)/.test(l), `caller missing repoRoot base: ${l.trim()}`);
   }
   assert.ok(callSites.length >= 9, `expected ≥9 call sites, found ${callSites.length}`);
 });

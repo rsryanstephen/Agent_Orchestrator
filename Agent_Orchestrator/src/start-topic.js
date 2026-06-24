@@ -42,9 +42,22 @@ function acquireConfigLock() {
 function releaseConfigLock() { try { fs.unlinkSync(LOCK_PATH); } catch {} }
 
 // ---------- CLI arg parse + global-config load ----------
-const [, , topicName, idArg] = process.argv;
+const [, , topicName, idArg, rootRepoArg] = process.argv;
 if (!topicName) {
-  die('Usage: node Agent_Orchestrator/start-topic.js <topic-name> [numerical-id]\n\n  Example: node Agent_Orchestrator/start-topic.js user-auth 2');
+  die('Usage: node Agent_Orchestrator/start-topic.js <topic-name> [numerical-id] [root-repo]\n\n  Example: node Agent_Orchestrator/start-topic.js user-auth 2 ../my-service');
+}
+
+// ---------- Resolve root-repo: 3rd positional arg sets the working/scan root for all
+// agents on this topic. Accept absolute or relative input; relative paths resolve against
+// the directory hstartt was invoked from (process.cwd()). Omitted/blank -> default cwd. ----------
+// `{}` is the harness empty-arg placeholder (same sentinel honored for idArg above).
+// Log the cwd fallback when an explicit-but-empty value is passed, mirroring idArg's warn.
+let rootRepo;
+if (rootRepoArg && rootRepoArg.trim() && rootRepoArg !== '{}') {
+  rootRepo = path.isAbsolute(rootRepoArg) ? rootRepoArg : path.resolve(process.cwd(), rootRepoArg);
+} else {
+  if (rootRepoArg && rootRepoArg !== '{}') log(`Blank root-repo "${rootRepoArg}" — defaulting to cwd: ${process.cwd()}`);
+  rootRepo = process.cwd();
 }
 
 const configPath = configUtils.globalConfigPath();
@@ -117,17 +130,24 @@ function stripGloballyDefinedKeys(seed, globalCfg) {
   const out = {};
   for (const k of Object.keys(seed)) {
     // Always keep meta comment + identity keys.
-    if (k.startsWith('//') || k === 'topic-id' || k === 'prompt-file') { out[k] = seed[k]; continue; }
+    // root-repo is a topic-only key (never in global-config); keep it unconditionally
+    // so the per-topic working/scan root always survives the strip even if a user later
+    // adds a root-repo default to global-config.json.
+    if (k.startsWith('//') || k === 'topic-id' || k === 'prompt-file' || k === 'root-repo') { out[k] = seed[k]; continue; }
     if (k in globalCfg) continue; // strip — let it cascade
     out[k] = seed[k];
   }
   return out;
 }
 
+// Seed root-repo into the topic config: this is the absolute filesystem root every
+// agent runs git against, resolves context-files relative paths from, and spawns the
+// provider CLI inside (see run-agent.js repoRoot).
 const seedTopicConfig = {
   '// README': HEADER_COMMENT,
   'topic-id': numericId,
   'prompt-file': `${topicName}.md`,
+  'root-repo': rootRepo,
 };
 const topicConfig = stripGloballyDefinedKeys(seedTopicConfig, config);
 
@@ -164,5 +184,10 @@ const lastTopicPath = path.join(HARNESS, '.last-topic');
 const { atomicWriteText } = require('./lib/safe-json-write');
 atomicWriteText(lastTopicPath, topicName);
 log(`.last-topic set to "${topicName}"`);
+// Encourage the user to scope agent work: root-repo sets where agents operate, and
+// populating context-files narrows their attention so they check known locations
+// FIRST instead of scanning the whole repo.
+log(`root-repo set to "${rootRepo}" — all agents for this topic run against that directory.`);
+log(`TIP: edit ${topicFilesDir}/${topicName}/${configUtils.TOPIC_CONFIG_FILENAME} and add the files/folders most relevant to this topic under "context-files" — agents read those FIRST, so it focuses their work and avoids wasteful full-repo scans.`);
 log(`Done. Write your task under "## User Prompt" in ${topicFilesDir}/${topicName}/${topicName}.md, then run:`);
 log(`  node Agent_Orchestrator/run-agent.js ${numericId} coding`);

@@ -1023,11 +1023,24 @@ function autoClassifyEffort(content) {
   return 'max';
 }
 
+// Map prompt-complexity score -> provider model tier. Heavy gate raised to >8
+// (was >5): verbose-but-routine prompts inflate `computePromptScore` (length +3,
+// >=5 bullets +3, generic verbs +2) and were over-assigning the heavy tier (Opus).
+// Heavy now requires genuine architectural signals stacked on top of verbosity,
+// not verbosity alone — fixing the "almost always Opus" cost complaint.
+// Architectural override: a brief-but-hard prompt (e.g. "redesign the auth
+// architecture from scratch") carries strong difficulty signal but a low raw
+// score, so the >8 gate alone would never reach Opus. Route any genuine
+// architecture/rewrite keyword straight to heavy regardless of verbosity, so
+// Opus stays RESERVED for hard tasks rather than ELIMINATED for terse ones.
 function autoClassifyModel(content, provider) {
   const tiers = _loadProviderTiers(provider);
+  const lower = (content || '').toLowerCase();
+  const architectural = /\b(architecture|overhaul|full rewrite|redesign|comprehensive|migrate all|refactor all|from scratch)\b/.test(lower);
+  if (architectural) return tiers.heavy;
   const score = computePromptScore(content);
   if (score <= 1) return tiers.light;
-  if (score <= 5) return tiers.medium;
+  if (score <= 8) return tiers.medium;
   return tiers.heavy;
 }
 
@@ -1057,12 +1070,18 @@ function resolveRoleEffort(role) {
   return '';
 }
 
-function applyPlanningEffortAndModel(planningText) {
+// `promptForModel` (the ORIGINAL user prompt) drives model-tier classification,
+// while `planningText` still drives effort. Scoring the verbose plan output for
+// the model tier inflated the score (plan length/bullets are planner artifacts,
+// not task difficulty) and forced Opus almost always. Falls back to planningText
+// when the caller has no original prompt, preserving prior behavior.
+function applyPlanningEffortAndModel(planningText, promptForModel) {
   // Guard: empty planningText causes autoClassifyModel to return the lightest tier
   // unconditionally, silently downgrading subsequent phases. Skip apply.
   if (!planningText || !planningText.trim()) return;
+  const modelSource = (promptForModel && promptForModel.trim()) ? promptForModel : planningText;
   const resolvedEffort = autoClassifyEffort(planningText);
-  const resolvedModel = autoClassifyModel(planningText, configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code'));
+  const resolvedModel = autoClassifyModel(modelSource, configUtils.cfgRead(topicConfig, config, 'provider', 'claude-code'));
   const family = modelFamilyName(resolvedModel);
   acquireTopicConfigLock(TOPIC_LOCK_PATH);
   try {
@@ -1256,18 +1275,23 @@ async function buildUsageFooter(model, usage, costUsd, fallbackNote, effortNote,
 // injected into the agent's system context. Tracks touched dirs/files,
 // validates JSON edits, refreshes topic-context.json.
 // =========================================================================
-function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd = null) {
+// baseRoot is the topic's root-repo: context-files relative paths resolve against it and
+// the agent's spawn cwd matches it, so emitted paths stay relative (and correct) when the
+// agent runs inside root-repo instead of the harness ROOT.
+function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd = null, baseRoot = ROOT) {
   if (!contextEntries || contextEntries.length === 0) return '';
   const paths = contextEntries.map(e => (typeof e === 'string' ? e : e.path));
   // Structurally exclude the active history file — it's already embedded in the User
   // Prompt; leaving it listed lets the agent enumerate the topic dir and read the full
   // thread, biasing its response toward the conversation rather than the queued prompt.
   const filtered = activeHistoryRel ? paths.filter(p => p !== activeHistoryRel) : paths;
-  const useAbsolute = agentCwd && path.resolve(agentCwd) !== path.resolve(ROOT);
+  // Compare the agent cwd against the resolution base (root-repo), not the hardcoded ROOT,
+  // so relative paths are kept whenever the agent runs in the same dir we resolve against.
+  const useAbsolute = agentCwd && path.resolve(agentCwd) !== path.resolve(baseRoot);
 
   const lines = [];
   for (const p of filtered) {
-    const absEntry = path.join(ROOT, p);
+    const absEntry = path.join(baseRoot, p);
     if (!fs.existsSync(absEntry)) continue;
     let stat;
     try { stat = fs.statSync(absEntry); } catch { continue; }
@@ -1283,7 +1307,7 @@ function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd =
       const capped = files.length > 20;
       for (const f of files.slice(0, 20)) {
         const rel = (p.replace(/\\/g, '/').replace(/\/$/, '') + '/' + f.name);
-        lines.push(useAbsolute ? path.join(ROOT, rel).replace(/\\/g, '/') : rel);
+        lines.push(useAbsolute ? path.join(baseRoot, rel).replace(/\\/g, '/') : rel);
       }
       if (capped) {
         lines.push((useAbsolute ? absEntry.replace(/\\/g, '/') : p) + ' (directory)');
@@ -1299,10 +1323,17 @@ function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd =
     ? `\nNote: Do NOT open or read \`${activeHistoryRel}\` — its relevant content is already embedded in the User Prompt above.`
     : '';
   const harnessHint = `Harness location: \`${path.resolve(HARNESS).replace(/\\/g, '/')}\``;
-  return `## Topic Context (prioritize reading and editing these files)\nCRITICAL: Always read and check the files listed below FIRST before searching the codebase for relevant files. Do not search for files to modify unless you have first checked these context files.\n${harnessHint}\n${lines.map(l => `- ${l}`).join('\n')}${historyNote}`;
+  // Strengthened wording: name the root-repo working dir explicitly and instruct the agent
+  // to check root-repo + the listed context-files FIRST, never scanning the whole repo before
+  // those locations — this is what stops agents wasting effort enumerating the entire tree.
+  const rootHint = `Work inside the root-repo: \`${path.resolve(baseRoot).replace(/\\/g, '/')}\`. This is the ONLY directory you operate in.`;
+  return `## Topic Context (prioritize reading and editing these files)\nCRITICAL: ${rootHint}\nCRITICAL: Always read and check the root-repo and the context files listed below FIRST before searching the codebase. Do NOT scan or enumerate the whole repo, and do NOT search for files to modify, until you have first checked these context locations.\n${harnessHint}\n${lines.map(l => `- ${l}`).join('\n')}${historyNote}`;
 }
 
 function recordTouchedFiles() {
+  // touchedDirs are resolved against ROOT (see path.join(ROOT, candidate) below), so this
+  // git status MUST run with cwd: ROOT. Using repoRoot when root-repo != ROOT would yield
+  // paths relative to a foreign repo that never exist under ROOT, recording nothing.
   const result = spawnSync('git', ['status', '--short', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
   if (result.status !== 0 || !result.stdout.trim()) return;
   // Strip UTF-8 BOM (git on Windows may emit one at the start of stdout).
@@ -1336,6 +1367,10 @@ function recordTouchedFiles() {
  * Logs each failure so the user/assessment agent can act on it.
  */
 function validateTouchedJsonFiles() {
+  // JSON validation targets harness JSON under ROOT/HARNESS, and abs paths below join
+  // against ROOT — so git MUST run with cwd: ROOT. Using repoRoot here would mismatch the
+  // `harnessRel` pathspec when root-repo != ROOT, silently matching nothing and letting
+  // malformed harness JSON pass unchecked.
   const harnessRel = path.relative(ROOT, HARNESS);
   const result = spawnSync('git', ['diff', '--name-only', '--diff-filter=ACM', '--', harnessRel], { cwd: ROOT, encoding: 'utf8' });
   const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '--', harnessRel], { cwd: ROOT, encoding: 'utf8' });
@@ -1551,7 +1586,9 @@ async function runClaude(payload, { silent = false, label = 'harness-run-agent.j
     if (preamble) finalPayload = preamble + '\n\n' + payload;
   }
   const stopReasonFallback = !!configUtils.cfgRead(topicConfig, config, 'enableStopReasonFallback', false);
-  const spawnOpts = { silent, label, modelArgs, effortEnv, fallbackNote, effortNote, streamOutput, heartbeatMs, prespawnHeartbeatMs, cliWatchdogMs, maxAttempts, backoffMs, stopReasonFallback };
+  // Spawn the provider CLI inside the topic's root-repo so the agent's own filesystem
+  // view and tool calls are rooted there, matching the git/context resolution base.
+  const spawnOpts = { silent, label, modelArgs, effortEnv, fallbackNote, effortNote, streamOutput, heartbeatMs, prespawnHeartbeatMs, cliWatchdogMs, maxAttempts, backoffMs, stopReasonFallback, cwd: repoRoot };
   try {
     return await provider.spawn(finalPayload, spawnOpts);
   } catch (err) {
@@ -1586,25 +1623,25 @@ function buildPayload(globalRules, systemPrompt, action, userPrompt, contextSect
 async function stageAndCommitChanges() {
   if (!topicConfig.stageAndCommit) return;
 
-  const stageResult = spawnSync('git', ['add', '-A'], { cwd: ROOT, encoding: 'utf8' });
+  const stageResult = spawnSync('git', ['add', '-A'], { cwd: repoRoot, encoding: 'utf8' });
   if (stageResult.status !== 0) {
     log(`Warning: git add failed: ${stageResult.stderr.trim()}`);
     return;
   }
 
-  const diffStat = spawnSync('git', ['diff', '--cached', '--stat'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  const diffStat = spawnSync('git', ['diff', '--cached', '--stat'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
   if (!diffStat) return;
 
   // Exclude markdown files from the diff used for commit message generation so
   // agent conversation history doesn't leak into the commit message.
-  const diffFull = spawnSync('git', ['diff', '--cached', '--', ':!*.md'], { cwd: ROOT, encoding: 'utf8' }).stdout
-    || spawnSync('git', ['diff', '--cached'], { cwd: ROOT, encoding: 'utf8' }).stdout;
+  const diffFull = spawnSync('git', ['diff', '--cached', '--', ':!*.md'], { cwd: repoRoot, encoding: 'utf8' }).stdout
+    || spawnSync('git', ['diff', '--cached'], { cwd: repoRoot, encoding: 'utf8' }).stdout;
 
   const commitPayload = `Write a single-line git commit message (imperative mood, under 72 chars) for these staged changes. Output only the message, no quotes, no explanation.\n\n${diffFull.slice(0, 4000)}`;
   const { text: rawCommit } = await runClaude(commitPayload, { silent: true });
   const commitMsg = rawCommit.trim().replace(/^["']|["']$/g, '');
 
-  const commitResult = spawnSync('git', ['commit', '-m', commitMsg], { cwd: ROOT, encoding: 'utf8' });
+  const commitResult = spawnSync('git', ['commit', '-m', commitMsg], { cwd: repoRoot, encoding: 'utf8' });
   if (commitResult.status !== 0) {
     log(`Warning: git commit failed: ${commitResult.stderr.trim()}`);
   } else {
@@ -1614,16 +1651,16 @@ async function stageAndCommitChanges() {
 
 async function saveUserChanges() {
   if (!topicConfig.stageAndCommit) return;
-  const diffResult = spawnSync('git', ['diff', '--stat'], { cwd: ROOT, encoding: 'utf8' });
+  const diffResult = spawnSync('git', ['diff', '--stat'], { cwd: repoRoot, encoding: 'utf8' });
   if (!diffResult.stdout.trim()) return;
 
-  spawnSync('git', ['add', '-u'], { cwd: ROOT, encoding: 'utf8' });
-  const cachedStat = spawnSync('git', ['diff', '--cached', '--stat'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  spawnSync('git', ['add', '-u'], { cwd: repoRoot, encoding: 'utf8' });
+  const cachedStat = spawnSync('git', ['diff', '--cached', '--stat'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
   if (!cachedStat) return;
 
   const firstLine = cachedStat.split('\n')[0].trim();
   const commitMsg = `Save user changes: ${firstLine}`;
-  const commitResult = spawnSync('git', ['commit', '-m', commitMsg], { cwd: ROOT, encoding: 'utf8' });
+  const commitResult = spawnSync('git', ['commit', '-m', commitMsg], { cwd: repoRoot, encoding: 'utf8' });
   if (commitResult.status === 0) log(`Saved: ${commitMsg}`);
   else log(`Warning: could not save user changes: ${commitResult.stderr.trim()}`);
 }
@@ -1753,6 +1790,13 @@ if (process.argv[2] === '--probe') {
 }
 
 let [,, topicArg, roleArg] = process.argv;
+// `--dump-prompt`: dev-only diagnostic. Prints each role's fully-assembled system
+// prompt (base + all conditional clauses) to stdout, then exits. Detected here so
+// the flag — which lands in argv[3]/`roleArg` when invoked as `<topic> --dump-prompt`
+// — is stripped before role validation (line ~1875) would reject it as an invalid
+// role. Topic still resolves normally so the dump reflects the live topic config.
+const dumpPrompt = process.argv.includes('--dump-prompt');
+if (dumpPrompt && roleArg === '--dump-prompt') roleArg = undefined;
 // =========================================================================
 // CLI bootstrap: resolve topic from argv/.last-topic, load global+topic
 // configs under lock, register topic in active-topics, set history path.
@@ -1878,6 +1922,14 @@ try {
     die(`topic-config.json failed to parse and no .bak exists: ${e.message}`);
   }
 }
+// Per-topic working/scan root. Set by start-topic.js (3rd hstartt arg) as the kebab
+// `root-repo` key. All git commands, context-files path resolution, and the provider
+// spawn cwd run against this dir instead of the hardcoded harness ROOT.
+// Back-compat: legacy topics (config predates the key) MUST fall back to ROOT, not
+// process.cwd() — otherwise their git diff/commit/status would silently retarget the
+// dir hrun was invoked from. Only topics that explicitly set `root-repo` get a foreign dir.
+const repoRoot = path.resolve(topicConfig['root-repo'] ?? topicConfig.rootRepo ?? ROOT);
+
 const TOPIC_LOCK_PATH = topicConfigPath + '.lock';
 
 // Crash-recovery: if a previous run wrote `_harness_auto_set` but crashed before
@@ -2156,20 +2208,23 @@ const copilotInstructionsNeutralisationClause =
 // bullet structure + spacing rules override caveman's "fragment OK / drop articles"
 // guidance when the two conflict. Caveman compression applies WITHIN each bullet;
 // the bullet/spacing skeleton itself is non-negotiable.
-// CARVE-OUT added: the one-sentence-per-bullet rule conflicts with the parallel-tasks
+// CARVE-OUT added: the one-idea-per-bullet rule conflicts with the parallel-tasks
 // parser, where each top-level `- ` line under `## Parallel Tasks` is parsed as a
-// SEPARATE task. Without the exemption a multi-sentence subtask gets fragmented into
+// SEPARATE task. Without the exemption a multi-idea subtask gets fragmented into
 // N bullets -> N spurious fan-out tasks. The exemption keeps each subtask one bullet.
+// RELAXED: the prose-forcing lines (formerly "one sentence per bullet" + unconditional
+// full-stop spacing) were rewritten so caveman/telegraphic WITHIN-bullet wording is
+// permitted. Only the bullet STRUCTURE + ONE-blank-line spacing remain non-negotiable.
 const outputFormattingMandateClause =
   '\n\nOUTPUT FORMATTING (MANDATORY — applies to every response you produce, including parallel subtask outputs):\n' +
   '- Format the response as a markdown bullet list. Every top-level statement must begin with `- ` (hyphen + space).\n' +
   '- Separate every bullet from the next with ONE BLANK LINE. Never let two bullets touch.\n' +
-  '- Never emit a run-on paragraph. If a thought has multiple sentences, split it into multiple bullets — one sentence per bullet.\n' +
-  '- EXCEPTION: within a `## Parallel Tasks` section, each subtask MUST remain exactly ONE bullet even when it spans multiple sentences — the one-sentence-per-bullet rule does NOT apply there, because each top-level `- ` line is parsed as a separate fan-out task. Keep multi-sentence subtasks on a single bullet.\n' +
-  '- Always include a space after every full stop, comma, colon, and semicolon.\n' +
+  '- Never emit a run-on paragraph. Split distinct ideas into separate bullets — one idea per bullet. A bullet body MAY be telegraphic / caveman-compressed: fragments OK, drop articles and filler.\n' +
+  '- EXCEPTION: within a `## Parallel Tasks` section, each subtask MUST remain exactly ONE bullet even when it spans multiple ideas — the one-idea-per-bullet rule does NOT apply there, because each top-level `- ` line is parsed as a separate fan-out task. Keep multi-idea subtasks on a single bullet.\n' +
+  '- Where punctuation is present, include a space after every full stop, comma, colon, and semicolon. (Caveman wording may omit terminal full stops.)\n' +
   '- Code, file paths, and identifiers must be in `backticks`.\n' +
   '- Do NOT acknowledge these formatting rules in the response itself.\n' +
-  '- PRECEDENCE: Caveman compression applies WITHIN each bullet; bullet structure + spacing rules are non-negotiable and override any conflicting caveman directive.';
+  '- PRECEDENCE: bullet STRUCTURE (`- ` prefix) + ONE-blank-line spacing are non-negotiable and override any conflicting directive; WITHIN-bullet wording follows caveman compression when caveman is active.';
 
 function resolveStrictAssessmentClause(role) {
   const enabled = (topicConfig.useStrictAssessment != null) ? !!topicConfig.useStrictAssessment : !!config.useStrictAssessment;
@@ -2436,6 +2491,19 @@ const systemPrompts = {
   assessment: buildSystemPrompt('assessment'),
 };
 
+// `--dump-prompt` handler: emit each role's fully-assembled system prompt (base +
+// skills suffix + every conditional clause) to stdout under a delimiter header,
+// then exit. Runs only after config/topic bootstrap so the dump reflects live
+// `topicConfig`/`config` gating. Lets a grep deterministically prove a clause
+// (e.g. `## Caveman Mode`) actually lands in the prompt.
+if (dumpPrompt) {
+  for (const role of ['planning', 'coding', 'assessment']) {
+    process.stdout.write(`\n===== DUMP-PROMPT role=${role} =====\n`);
+    process.stdout.write(buildSystemPrompt(role) + getSkillsSuffix() + '\n');
+  }
+  process.exit(0);
+}
+
 let plannedSubtasks = null;
 
 // Resolve the single history file path — derived as <topic-files-dir>/<topic>/<topic>.md.
@@ -2494,7 +2562,7 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
     '\n\nREAD-ONLY PHASE DIRECTIVE (mandatory): You are in a PLANNING phase only. Do NOT write, edit, or create any files. Read source files to understand the codebase, then output your plan. File mutations in this phase will be detected and flagged as a failure.';
   // Snapshot git state before planning so we can detect any file mutations afterward.
   const planSnapBefore = !_planProvCaps.planMode
-    ? spawnSync('git', ['diff', '--name-only'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim()
+    ? spawnSync('git', ['diff', '--name-only'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim()
     : null;
 
   const context = parseConversationContext(historyPath);
@@ -2509,7 +2577,7 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
   // Inject history-self-lookup skill so the planning agent fetches prior-turn
   // context lazily via `Read` instead of receiving the parsed/truncated dump.
   const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, historyRel, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, historyRel, repoRoot, repoRoot);
   // On re-run, use a planning system prompt WITHOUT the interrogate clause and add an explicit
   // "do not re-interrogate" action directive — prevents infinite clarifying-question loops.
   const systemPromptForRun = isRerun
@@ -2532,7 +2600,7 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
 
   // Gap #1: diff check — warn if planning agent mutated files on a planMode=false provider.
   if (planSnapBefore !== null) {
-    const planSnapAfter = spawnSync('git', ['diff', '--name-only'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+    const planSnapAfter = spawnSync('git', ['diff', '--name-only'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
     if (planSnapAfter && planSnapAfter !== planSnapBefore) {
       const mutated = planSnapAfter.split('\n').filter(f => !planSnapBefore.split('\n').includes(f));
       if (mutated.length) {
@@ -2544,7 +2612,9 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
   const footer = await buildUsageFooter(model, usage, costUsd, fallbackNote, effortNote, { stopReason, continuations });
   if (footer) process.stdout.write(footer + '\n');
   appendToFile(historyPath, `## ${ROLE_HEADER.planning}`, text + footer, { appendUserPromptSuffix: !noSuffix });
-  applyPlanningEffortAndModel(text);
+  // Pass the original user prompt (`context`) as the model-tier signal so verbose
+  // plan output does not inflate the score into the heavy (Opus) tier.
+  applyPlanningEffortAndModel(text, context);
   if (getMaxConcurrentAgents() > 1) {
     // Use the pure `nextPlannedSubtasksFromPlan` reducer so the assignment is UNCONDITIONAL.
     // A plan without `## Parallel Tasks` yields null, which overwrites any prior round's
@@ -2564,7 +2634,7 @@ async function runPlanning(noSuffix = false, { isRerun = false } = {}) {
 
 async function validateParallelPremises(subtasks, planText) {
   log('--- Phase: premise-validator ---');
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const subtaskList = subtasks.map((t, i) => `### Subtask ${i + 1}\n${t}`).join('\n\n');
   const validatorPrompt =
 `You are a premise validator. For each subtask below, check whether every factual claim (file path, function name, line number, diagnosis) is accurate against the actual source files referenced.
@@ -2632,7 +2702,7 @@ async function runCodingFromPlan(noSuffix = false) {
   }
   // Inject history-self-lookup skill for the coding-from-plan main turn.
   const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const payload = buildPayload(globalRules, historySelfLookup + systemPrompts.coding + getSkillsSuffix(), `Execute the implementation plan below. Write a concise summary of what you did.${actionVerbositySuffix()}`, taskContent, ctxSection);
   const _snap = snapshotHistorySize();
   const { text, model, usage, costUsd, fallbackNote, effortNote, stopReason, continuations } = await runClaude(payload, { label: 'coding-agent', role: 'coding' });
@@ -2652,7 +2722,7 @@ async function runCoding(noSuffix = false) {
   if (!context) die(`No "## User Prompt" found in ${promptFileRel}`);
   // Inject history-self-lookup skill for the coding main turn.
   const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
 
   // Plan-mode two-pass gate for providers without native plan-mode support.
   let taskContent = context;
@@ -2705,10 +2775,10 @@ async function runAssessment(noSuffix = false, { parallelTaskCount = 0 } = {}) {
     "Review the latest git diff and the coding agent's recent response for issues.";
   // Inject history-self-lookup skill for the assessment main turn.
   const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const verbosity = topicConfig ? (topicConfig.outputVerbosity ?? 5) : 5;
   const diffLimit = verbosity >= 8 ? 16000 : verbosity >= 5 ? 8000 : 4000;
-  const unstagedDiff = spawnSync('git', ['diff'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  const unstagedDiff = spawnSync('git', ['diff'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
   const diffSection = unstagedDiff
     ? `\n\n## Unstaged Git Diff\n\n\`\`\`diff\n${unstagedDiff.slice(0, diffLimit)}\n\`\`\``
     : '';
@@ -2816,7 +2886,7 @@ async function runCodingParallel(subtasks, noSuffix = false, { noPlanning = fals
   const cap = getMaxConcurrentAgents();
   const tasks = subtasks.slice(0, Math.min(subtasks.length, cap));
   log(`--- Phase: coding (parallel × ${tasks.length}) ---`);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const fullContext = parseConversationContext(historyPath) || '';
   const codingSystemPrompt = buildSystemPrompt('coding', { codingNoPlanning: noPlanning }) + getSkillsSuffix();
   const snapBefore = snapshotHistorySize();
@@ -2880,11 +2950,11 @@ async function runAssessmentParallel(subtasks, noSuffix = false) {
   log(`--- Phase: assessment (parallel × ${tasks.length}) ---`);
   const verbosity = topicConfig ? (topicConfig.outputVerbosity ?? 5) : 5;
   const diffLimit = verbosity >= 8 ? 16000 : verbosity >= 5 ? 8000 : 4000;
-  const unstagedDiff = spawnSync('git', ['diff'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  const unstagedDiff = spawnSync('git', ['diff'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
   const diffSection = unstagedDiff
     ? `\n\n## Unstaged Git Diff (combined across all parallel coding agents)\n\n\`\`\`diff\n${unstagedDiff.slice(0, diffLimit)}\n\`\`\``
     : '';
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const historyContent = fs.readFileSync(historyPath, 'utf8');
   const codingSummaries = tasks.map((_, i) => {
     const n = i + 1;
@@ -2940,7 +3010,7 @@ async function runCodingAssessmentParallel(subtasks, noSuffix = false) {
   const cap = getMaxConcurrentAgents();
   const tasks = subtasks.slice(0, Math.min(subtasks.length, cap));
   log(`--- Phase: fix (parallel × ${tasks.length}) ---`);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const historyContent = fs.readFileSync(historyPath, 'utf8');
   const taskFeedback = tasks.map((_, i) => {
     const n = i + 1;
@@ -3006,7 +3076,7 @@ async function runCodingAssessment(noSuffix = false, { parallelTaskCount = 0 } =
   if (!feedback) die(`No "## ${ROLE_HEADER.assessment}" found in ${promptFileRel}. Run assessment first.`);
   // Inject history-self-lookup skill for the fix/remediation main turn.
   const historySelfLookup = buildHistorySelfLookupBlock(historyPath);
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const parallelHeader = buildParallelCodingBriefHeader(parallelTaskCount);
   const payload = buildPayload(
     globalRules,
@@ -3398,7 +3468,7 @@ const USER_REPLY_HEADER = 'User Reply to Questions';
 
 async function autoAnswerClarifyingQuestionsClarifyingQuestions(questionsText, { headerName = USER_REPLY_HEADER } = {}) {
   log('Auto-answer-clarifying-questionsing clarifying questions via assessment agent...');
-  const ctxSection = buildContextSection(topicConfig.contextFiles, null, process.cwd());
+  const ctxSection = buildContextSection(topicConfig.contextFiles, null, repoRoot, repoRoot);
   const fullContext = parseConversationContext(historyPath) || '';
   const numbered = extractNumberedQuestions(questionsText);
   const expectedCount = numbered.length;
@@ -4427,7 +4497,8 @@ async function _maybeRunParallelQueueBatch({ defaultPipelineShort }) {
   const maxParallel = Number(configUtils.cfgRead(topicConfig, config, 'max-parallel-agents', 4)) || 4;
   const stageAndCommit = !!configUtils.cfgRead(topicConfig, config, 'stage-and-commit', false);
   const useWorktree = !!configUtils.cfgRead(topicConfig, config, 'parallel-use-worktree', false);
-  const repoRoot = ROOT;
+  // Parallel-batch runner now uses the module-level repoRoot (topic root-repo) instead of
+  // the hardcoded ROOT, so spawned child agents and their git ops target the same dir.
   // Drain the queue of every non-hold block atomically so the runner owns them.
   const drained = [];
   for (let i = 0; i < nonHold.length; i++) {

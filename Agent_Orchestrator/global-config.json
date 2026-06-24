@@ -3,15 +3,14 @@
   "provider": "claude-code",
   "// harness-root": "Absolute path to the single Agent_Orchestrator instance (the inner dir holding `src/` and `shell-functions.txt`). `install-shell-functions.js` substitutes this for the `{{HARNESS_ROOT}}` placeholder so the installed rc functions use absolute paths and work from ANY repo — no per-repo copy needed. Empty/absent -> installer self-detects via the script location. Use forward slashes on Windows (e.g. `C:/Users/you/Repos/Agent_Orchestrator/Agent_Orchestrator`).",
   "harness-root": "C:/Users/ryan.stephen/Repos/Agent_Orchestrator/Agent_Orchestrator",
-  "auto-install-shell-functions": false,
+  "auto-install-shell-functions": true,
   "topic-files-dir": "Agent_Orchestrator/topic_files",
   "// topic-ids": "Numeric-ID -> topic-name map. Replaces legacy `ids` + redundant `topics` registry. Topic existence is derived from values of this map (and the on-disk topic-files-dir).",
   "topic-ids": {
-    "1": "claude_harness",
+    "1": "harness_dev",
     "2": "cache_possible_values",
     "3": "general",
-    "4": "optimal-blue",
-    "5": "optimal-blue"
+    "4": "optimal-blue"
   },
   "regression-tests": true,
   "stage-and-commit": false,

@@ -279,7 +279,9 @@ class ClaudeCodeProvider extends Provider {
 
       const { cmd: claudeExec, shell: claudeShell } = resolveClaudeExec();
       const child = spawn(claudeExec, args, {
-        cwd: ROOT,
+        // Honour the caller-supplied cwd (the topic's root-repo from run-agent.js); fall
+        // back to the harness ROOT when none is passed (e.g. direct/standalone callers).
+        cwd: opts.cwd || ROOT,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ...effortEnv, CLAUDE_SESSION_DIR: harnessSessionDir, ANTHROPIC_PROJECT_DIR: harnessSessionDir },
         shell: claudeShell,

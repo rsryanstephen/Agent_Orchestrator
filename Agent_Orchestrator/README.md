@@ -22,7 +22,7 @@ The installed functions use **absolute paths** — run `hrun`, `hstartt`, etc. f
 **How to run (minimal walkthrough):**
 
 ```bash
-hstartt my-feature 5     # 1. create topic "my-feature" with id 5
+hstartt my-feature 5 .   # 1. create topic "my-feature" with id 5, root-repo = current dir
                          # 2. open topic_files/my-feature/my-feature.md and write your task
                          #    under the existing "## User Prompt" header
 hrun 5-all               # 3. run planning → coding → assessment → fix on topic 5
@@ -64,7 +64,7 @@ Replace `{{HARNESS_ROOT}}` with the absolute path of your harness inner director
 
 ```bash
 # Topic management
-hstartt()    { \node {{HARNESS_ROOT}}/src/start-topic.js "$1" "$2"; }   # hstartt <topic> [id]
+hstartt()    { \node {{HARNESS_ROOT}}/src/start-topic.js "$1" "$2" "$3"; }   # hstartt <topic> [id] [root-repo]
 hsett()      { \node {{HARNESS_ROOT}}/src/set-topic.js "$1" "$2"; }     # hsett <topic> <id>
 hrentopic()  { \node {{HARNESS_ROOT}}/src/rename-topic.js "$1" "$2"; }  # hrentopic <topic|id> <new-name>
 hrmtopic()   { \node {{HARNESS_ROOT}}/src/remove-topic.js "$1"; }       # hrmtopic <topic|id|all>
@@ -99,10 +99,12 @@ hprobe()         { \node {{HARNESS_ROOT}}/src/run-agent.js --probe; }  # hprobe 
 # \node {{HARNESS_ROOT}}/src/install-shell-functions.js "$@"; [--force]
 ```
 
+> **`hstartt` third arg — `root-repo`.** `hstartt <topic> [id] [root-repo]` accepts a third positional arg setting the topic's working/scan root. It may be **absolute** or **relative** (relative paths are resolved against the directory `hstartt` is invoked from), and is normalized to an absolute path. When omitted it **defaults to the current working directory**. The value is written into `topic-config.json` under the kebab-case key `root-repo` and defines the working/scan root for **all** agents (planning, coding, assessment, fix) — the cwd for git operations, the base for resolving relative `context-files` paths, and the agent spawn cwd.
+
 Usage with shell functions:
 
 ```bash
-hstartt my-feature 5
+hstartt my-feature 5 ~/Repos/my-app   # root-repo set to ~/Repos/my-app
 hrun 5-c              # coding for topic 5
 hrun 5-all            # full planning → coding → assessment → fix pipeline for topic 5
 hrun caf              # code-assess-fix on the last-touched topic
