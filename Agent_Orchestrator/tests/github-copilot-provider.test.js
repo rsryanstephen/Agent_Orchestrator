@@ -908,6 +908,60 @@ test('spawnCopilot: absent copilot-cli-settings does not prefix prompt', () => {
   assert.strictEqual(result, 'Do the task.', 'prompt unchanged when copilot-cli-settings absent');
 });
 
+// ── _resolveToolsFlag ─────────────────────────────────────────────────────────
+
+test('_resolveToolsFlag: uses --allow-builtin-tools when CLI help contains flag', () => {
+  provider._resetToolsFlag();
+  const stubSpawnSync = () => ({ stdout: '--allow-builtin-tools  restrict to built-in tools', stderr: '' });
+  const flag = provider._resolveToolsFlag(stubSpawnSync);
+  assert.strictEqual(flag, '--allow-builtin-tools', 'must return --allow-builtin-tools when help output contains it');
+  provider._resetToolsFlag();
+});
+
+test('_resolveToolsFlag: falls back to --allow-all-tools when CLI help lacks flag', () => {
+  provider._resetToolsFlag();
+  const stubSpawnSync = () => ({ stdout: '--allow-all-tools  allow all tools', stderr: '' });
+  const flag = provider._resolveToolsFlag(stubSpawnSync);
+  assert.strictEqual(flag, '--allow-all-tools', 'must fall back to --allow-all-tools when --allow-builtin-tools absent');
+  provider._resetToolsFlag();
+});
+
+test('_resolveToolsFlag: caches result after first probe', () => {
+  provider._resetToolsFlag();
+  let callCount = 0;
+  const stubSpawnSync = () => { callCount++; return { stdout: '--allow-builtin-tools', stderr: '' }; };
+  provider._resolveToolsFlag(stubSpawnSync);
+  provider._resolveToolsFlag(stubSpawnSync); // second call must use cache
+  assert.strictEqual(callCount, 1, 'spawnSync must be called only once (result cached)');
+  provider._resetToolsFlag();
+});
+
+test('_resolveToolsFlag: falls back to --allow-all-tools on spawnSync error', () => {
+  provider._resetToolsFlag();
+  const stubSpawnSync = () => { throw new Error('binary not found'); };
+  const flag = provider._resolveToolsFlag(stubSpawnSync);
+  assert.strictEqual(flag, '--allow-all-tools', 'must fall back to --allow-all-tools on probe error');
+  provider._resetToolsFlag();
+});
+
+test('spawnCopilot: passes resolved tools flag from _resolveToolsFlag as first arg', () => {
+  provider._resetToolsFlag();
+  let capturedArgs = null;
+  const fakeChild = {
+    stdin: { on: () => {}, write: () => {}, end: () => {} },
+    on: (ev, cb) => { if (ev === 'close') setTimeout(() => cb(0), 5); },
+  };
+  const stubSpawnSync = () => ({ stdout: '--allow-builtin-tools', stderr: '' });
+  provider.spawnCopilot({
+    prompt: 'test',
+    _spawn: (_bin, args) => { capturedArgs = args; return fakeChild; },
+    _spawnSync: stubSpawnSync,
+  });
+  assert.ok(Array.isArray(capturedArgs), 'args must be captured');
+  assert.strictEqual(capturedArgs[0], '--allow-builtin-tools', 'first arg must be --allow-builtin-tools');
+  provider._resetToolsFlag();
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────────
 
 if (_failed > 0) {

@@ -65,14 +65,20 @@ function classifyTransientError(stderrOrErrObj) {
 }
 
 // Canary phrase Claude CLI prints when `--model <id>` is unknown to the account/provider.
-// Matches EITHER half (top-level `|`): the "selected model ... may not exist or you may
-// not have access" line OR the "Run --model to pick a different model" hint. Either alone
-// is a real CLI failure signature; precedence over noisy 429/5xx substrings is enforced
-// by the caller (claude-code.js `on('close')` checks model-availability FIRST), not by
-// this regex. Capture group 1 extracts the offending model id from the parenthesised
-// "selected model (<id>) ..." form so callers can surface it to the user.
-const MODEL_UNAVAILABLE_REGEX = /selected model(?:\s*\(([^)]+)\))?[\s\S]{0,200}?may not exist or you may not have access|Run\s+--model\s+to\s+pick\s+a\s+different\s+model/i;
+// Matches THREE shapes (top-level `|`): (1) Claude's "selected model ... may not exist or
+// you may not have access" line, (2) Claude's "Run --model to pick a different model" hint,
+// (3) Copilot CLI's `Model "<id>" from --model flag is not available.` line. Any one alone
+// is a real CLI failure signature; precedence over noisy 429/5xx substrings is enforced by
+// the caller (claude-code.js `on('close')` checks model-availability FIRST), not by this
+// regex. Capture group 1 extracts the offending model id from Claude's parenthesised
+// "selected model (<id>) ..." form; capture group 2 extracts it from Copilot's
+// quoted `Model "<id>" from --model flag` form — so callers can surface it to the user.
+const MODEL_UNAVAILABLE_REGEX = /selected model(?:\s*\(([^)]+)\))?[\s\S]{0,200}?may not exist or you may not have access|Run\s+--model\s+to\s+pick\s+a\s+different\s+model|Model\s+"?([^"\n]+?)"?\s+from\s+--model\s+flag\s+is\s+not\s+available/i;
 
+// Classifies model-unavailability errors across providers. Extended to detect the Copilot
+// CLI string in addition to Claude's so that `err.modelUnavailable` is set and the
+// omit-`--model` retry fallback in run-agent.js can fire; without this branch the Copilot
+// failure was classified as `{kind:null}` and the phase died as error_unknown.
 function classifyModelAvailabilityError(stderrOrErrObj) {
   const buf = typeof stderrOrErrObj === 'string'
     ? stderrOrErrObj
@@ -80,7 +86,9 @@ function classifyModelAvailabilityError(stderrOrErrObj) {
   if (!buf) return { kind: null };
   const m = buf.match(MODEL_UNAVAILABLE_REGEX);
   if (!m) return { kind: null };
-  return { kind: 'model-unavailable', model: m[1] ? m[1].trim() : null };
+  // group 1 = Claude parenthesised id; group 2 = Copilot quoted id.
+  const model = (m[1] || m[2] || '').trim() || null;
+  return { kind: 'model-unavailable', model };
 }
 
 // ── Context-window / prompt-too-long detection ─────────────────────────────

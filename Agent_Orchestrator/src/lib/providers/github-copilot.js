@@ -273,6 +273,30 @@ function clearHooks() {
 
 // ── Spawn ─────────────────────────────────────────────────────────────────────
 
+// Cached result of flag-support probe: null = not yet probed.
+let _toolsFlag = null;
+
+// Probe 'copilot --help' once to determine whether --allow-builtin-tools is
+// supported. Org Copilot policy blocks third-party MCP servers; --allow-builtin-tools
+// restricts the CLI to built-in tools only and avoids the policy hard-exit.
+// Falls back to --allow-all-tools for older CLI versions that lack the flag.
+function _resolveToolsFlag(_spawnSyncFn) {
+  if (_toolsFlag !== null) return _toolsFlag;
+  try {
+    const fn = _spawnSyncFn || spawnSync;
+    const { bin, shell } = resolvecopilotBin();
+    const r = fn(bin, ['--help'], { shell, timeout: 5000, encoding: 'utf8', windowsHide: true });
+    const helpText = (r.stdout || '') + (r.stderr || '');
+    _toolsFlag = helpText.includes('--allow-builtin-tools') ? '--allow-builtin-tools' : '--allow-all-tools';
+  } catch {
+    _toolsFlag = '--allow-all-tools';
+  }
+  return _toolsFlag;
+}
+
+/** Reset the cached tools-flag probe result (test helper). */
+function _resetToolsFlag() { _toolsFlag = null; }
+
 function resolvecopilotBin() {
   if (process.platform !== 'win32') return { bin: 'copilot', shell: false };
   const r = spawnSync('copilot', ['--version'], { shell: false, timeout: 3000, encoding: 'utf8', windowsHide: true });
@@ -290,7 +314,7 @@ function resolvecopilotBin() {
  */
 function spawnCopilot(opts) {
   // _configPath: test-only injection to override global-config.json path.
-  const { prompt, model, mcpConfig, cwd, silent, _spawn: spawnFn = spawn, _configPath } = opts || {};
+  const { prompt, model, mcpConfig, cwd, silent, _spawn: spawnFn = spawn, _spawnSync: spawnSyncFn, _configPath } = opts || {};
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-harness-'));
 
   // Prefix prompt with Copilot CLI slash commands from the copilot-cli-settings block in global-config.json.
@@ -309,7 +333,7 @@ function spawnCopilot(opts) {
   // Windows cmd.exe caps argv at ~8191 chars (shell:true path); large prompts with
   // injected inline-skills routinely exceed this. -p is omitted so copilot reads
   // the piped stdin as the non-interactive prompt input.
-  const args = ['--allow-all-tools', '--log-dir', logDir];
+  const args = [_resolveToolsFlag(spawnSyncFn), '--log-dir', logDir];
   if (model && model.trim()) args.push('--model', model.trim());
   if (mcpConfig && fs.existsSync(mcpConfig)) args.push('--mcp-config', mcpConfig);
 
@@ -603,4 +627,6 @@ module.exports = {
   _parseCopilotLogEntry: parseCopilotLogEntry,
   _readLogDirJsonl: readLogDirJsonl,
   _clearHooks: clearHooks,
+  _resolveToolsFlag,
+  _resetToolsFlag,
 };

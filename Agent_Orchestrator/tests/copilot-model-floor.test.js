@@ -169,6 +169,22 @@ test('(CMF8) model-unavailable fallback omits --model when medium tier equals at
   assert.ok(block.includes('modelArgs: []'), 'same-tier fallback must retry with modelArgs: [] to omit --model flag');
 });
 
+test('(CMF9) classifyModelAvailabilityError detects Copilot "not available" string and extracts model id', () => {
+  const { classifyModelAvailabilityError } = require(path.join(HARNESS, 'src', 'lib', 'token-error.js'));
+  const stderr = 'Error: Model "gpt-5" from --model flag is not available.';
+  const res = classifyModelAvailabilityError(stderr);
+  assert.strictEqual(res.kind, 'model-unavailable', `expected kind model-unavailable, got "${res.kind}"`);
+  assert.strictEqual(res.model, 'gpt-5', `expected model gpt-5, got "${res.model}"`);
+});
+
+test('(CMF10) classifyModelAvailabilityError still detects Claude phrasing (no regression)', () => {
+  const { classifyModelAvailabilityError } = require(path.join(HARNESS, 'src', 'lib', 'token-error.js'));
+  const stderr = 'The selected model (claude-foo-9) may not exist or you may not have access.';
+  const res = classifyModelAvailabilityError(stderr);
+  assert.strictEqual(res.kind, 'model-unavailable');
+  assert.strictEqual(res.model, 'claude-foo-9');
+});
+
 // ---------------------------------------------------------------------------
 if (_failed === 0) console.log('\nAll copilot-model-floor tests passed.');
 else console.error(`\n${_failed} copilot-model-floor test(s) FAILED.`);
