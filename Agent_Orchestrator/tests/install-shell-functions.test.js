@@ -41,7 +41,7 @@ const END   = '# <<< Agent_Orchestrator shell functions <<<';
 test('(1) source contains hasBlock guard that skips re-install without --force', () => {
   assert.ok(/const hasBlock/.test(installSrc) || /hasBlock\s*=/.test(installSrc),
     'install source must define hasBlock variable to detect existing managed block');
-  assert.ok(/if \(!FORCE && hasBlock\)/.test(installSrc) || /if \(!force && hasBlock\)/.test(installSrc),
+  assert.ok(/if \(!FORCE && hasBlock/.test(installSrc) || /if \(!force && hasBlock/.test(installSrc),
     'install source must skip install when managed block already present and no --force flag');
   assert.ok(/no changes/.test(installSrc),
     'install source must log "no changes" when block already present');
@@ -157,6 +157,24 @@ test('(12) renderSource persists resolved harness-root to global-config via writ
     'persistHarnessRoot must assign the resolved root to cfg[harness-root]');
   assert.ok(/if \(currentNorm === root\) return/.test(installSrc),
     'persistHarnessRoot must skip the rewrite when the stored value already matches');
+});
+
+// ── (13) .bash_profile always written even when .bashrc already exists ────────
+test('(13) targets always starts with candidates[0] (.bash_profile) regardless of existing files', () => {
+  assert.ok(/\.bash_profile/.test(installSrc),
+    'installer must include .bash_profile as a candidate');
+  // The targets expression must unconditionally start with candidates[0] so that
+  // .bash_profile is written even when .bashrc already exists (typical Git Bash state).
+  assert.ok(
+    /const targets\s*=\s*\[candidates\[0\]/.test(installSrc),
+    'targets must unconditionally start with candidates[0] (.bash_profile)'
+  );
+  // Regression guard: old conditional form `existing.length > 0 ? existing : [candidates[0]]`
+  // would skip creating .bash_profile whenever any rc file already existed.
+  assert.ok(
+    !/existing\.length\s*>\s*0\s*\?\s*existing\s*:\s*\[candidates\[0\]\]/.test(installSrc),
+    'targets must NOT use the conditional that skips .bash_profile when .bashrc exists'
+  );
 });
 
 if (_failed === 0) console.log('\nAll install-shell-functions tests passed.');

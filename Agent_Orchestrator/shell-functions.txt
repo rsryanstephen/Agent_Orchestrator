@@ -35,7 +35,7 @@ hqregen()        { \node {{HARNESS_ROOT}}/src/regenerate-queue.js "$@"; }
 hupdate-models()   { \node {{HARNESS_ROOT}}/src/update-models-reference.js; }  # hupdate-models
 hfetch-models()    { \node {{HARNESS_ROOT}}/src/fetch-models.js; }             # hfetch-models — force-refresh model catalog cache
 hprobe()           { \node {{HARNESS_ROOT}}/src/run-agent.js --probe; }  # hprobe — checks provider auth
-hsync()            { \node {{HARNESS_ROOT}}/src/sync-user-native-config.js; }  # hsync — copy Code/User/user_native_config.md into all provider-native config files listed in Code/User/global_config_per_provider.md
+hsync()            { \node {{HARNESS_ROOT}}/src/sync-user-native-config.js; }  # hsync — copy user_native_config.md into all provider-native config files listed in global_config_per_provider.md
 
 # Harness install (idempotent — adds these functions to your rc file if missing)
 # \node {{HARNESS_ROOT}}/src/install-shell-functions.js "$@"; [--force]

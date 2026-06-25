@@ -57,3 +57,30 @@ test('playCompletionSound delegates without a never-resetting latch', () => {
     'expected playCompletionSound to delegate to _playSoundFile',
   );
 });
+
+test('completion-chime gate is hold-aware: uses parseQueue not queueLength', () => {
+  // Bug: queueLength() counts ALL blocks including held ones. When remaining
+  // blocks are all on hold, chime was incorrectly suppressed. Fix uses parseQueue
+  // and filters to only unheld blocks before deciding whether to chime.
+  assert.ok(
+    !/_postDrainPending/.test(SRC),
+    'old queueLength-based _postDrainPending variable must not remain in chime gate',
+  );
+  assert.ok(
+    /promptQueue\.parseQueue\(topicDirPath\(\)\)/.test(SRC),
+    'chime gate must call parseQueue (hold-aware) not queueLength',
+  );
+  assert.ok(
+    /_postDrainBlocks\.filter\(b => !b\.held\)\.length/.test(SRC),
+    'chime gate must filter out held blocks before checking count',
+  );
+  assert.ok(
+    /_postDrainUnheld === 0/.test(SRC),
+    'chime gate must fire when unheld count is 0 (all-held or empty both qualify)',
+  );
+  // Skipped-chime log must reference unheld, not pending.
+  assert.ok(
+    /unheld=\$\{_postDrainUnheld\}/.test(SRC),
+    'skipped-chime log must show unheld count not pending count',
+  );
+});

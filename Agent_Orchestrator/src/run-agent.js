@@ -49,7 +49,7 @@ const configUtils = require('./config-utils');
 // not re-fire the keystroke chord (double focus-steal) when an ancestor already
 // flushed before spawning it.
 const { flushViaKeystroke, FLUSHED_ENV } = require('./editor-buffer-flush');
-const { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER: ROLE_HEADER_LIB } = require('./lib/fan-out');
+const { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER: ROLE_HEADER_LIB, extractLatestSection } = require('./lib/fan-out');
 const { getProvider } = require('./lib/providers/registry');
 // classifyTokensExhausted added to drive cross-provider fallback chain:
 // quota errors from non-Claude providers carry no rate-reset clock, so this
@@ -59,6 +59,29 @@ const { getAdvisorFlags } = require('./lib/advisor-flags');
 
 const ROOT = path.join(__dirname, '..', '..');
 const HARNESS = path.join(__dirname, '..');
+
+// Load .env from harness root into process.env (env wins over file — never overwrite).
+// Hand-rolled parser: no new dependencies. Supports KEY="value" and KEY=value lines.
+// Used by github-copilot provider to read COPILOT_GITHUB_TOKEN without a dotenv package.
+(function loadDotEnv() {
+  try {
+    const envPath = path.join(HARNESS, '.env');
+    if (!fs.existsSync(envPath)) return;
+    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eqIdx = line.indexOf('=');
+      if (eqIdx < 1) continue;
+      const key = line.slice(0, eqIdx).trim();
+      let val = line.slice(eqIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key && !(key in process.env)) process.env[key] = val;
+    }
+  } catch { /* best-effort — missing or unreadable .env is not fatal */ }
+}());
 // 'ask' answers questions without modifying files; 'ask-code' asks then runs coding phase.
 const VALID_ROLES = ['planning', 'coding', 'assessment', 'fix', 'assess-fix', 'plan-code', 'code-assess-fix', 'all', 'continue', 'ask', 'ask-code'];
 
@@ -85,9 +108,9 @@ const LATEST_HAIKU = 'claude-haiku-4-5-20251001';
 // Keys are the harness provider ids; tiers map to prompt-complexity buckets.
 const _PROVIDER_AUTO_MODELS_STATIC = {
   'claude-code':    { light: LATEST_HAIKU,         medium: LATEST_SONNET,    heavy: LATEST_OPUS },
-  // Copilot CLI GA (Feb 2026) rejects gpt-4o ids; gpt-5/gpt-5-mini are also unavailable.
-  // gpt-4.1 family is the last confirmed-working GPT tier per user directive.
-  'github-copilot': { light: 'gpt-4.1-mini',        medium: 'gpt-4.1',        heavy: 'gpt-4.1' },
+  // GPT-5 floor enforced per user directive (Jun 2026): copilot --model gpt-5 confirmed accepted.
+  // gpt-4* family excluded; selectTiers/STATIC_FALLBACKS in model-catalog.js enforce same floor.
+  'github-copilot': { light: 'gpt-5-mini',           medium: 'gpt-5',          heavy: 'gpt-5' },
   // Gemini CLI GA: 2.0-flash deprecated; use 2.5-flash for light tier per user directive.
   'gemini':         { light: 'gemini-2.5-flash',   medium: 'gemini-2.5-pro', heavy: 'gemini-2.5-pro' },
   'gemini-vertex':  { light: 'gemini-2.5-flash',   medium: 'gemini-2.5-pro', heavy: 'gemini-2.5-pro' },
@@ -111,7 +134,9 @@ function _loadProviderTiers(providerId) {
     const age = Date.now() - (cache.fetchedAt || 0);
     if (age <= THIRTY_DAYS_MS) {
       const entry = cache.providers && cache.providers[providerId];
-      if (entry && entry.tiers) {
+      // Require at least one non-null tier value — all-null writes (e.g. gpt-4-only catalog
+      // after GPT-5 floor filter) must not be treated as a valid cache hit; fall through to static.
+      if (entry && entry.tiers && (entry.tiers.heavy || entry.tiers.medium || entry.tiers.light)) {
         return entry.tiers;
       }
     }
@@ -152,13 +177,14 @@ const ANY_RESPONSE_HEADER = '(?:Planning|Coding|Assessment)\\s+Agent(?:\\s+\\d+)
 // stale owners via `process.kill(pid, 0)` liveness probes.
 // =========================================================================
 function log(msg) { console.log(msg); }
-// Central fatal-exit helper. Now also fires the error sound before exiting so
-// every die() path is audible. playErrorSound is a hoisted function declaration,
+// Central fatal-exit helper. Fires the error sound synchronously before exiting so
+// every die() path is audible. _playSoundFileSync is a hoisted function declaration,
 // so the forward reference resolves at call time; try/catch guards the early-load
 // case where sound config/deps are not ready and prevents a sound failure from
 // masking the real error. Master-switch + error-sound-file gating lives inside
-// _playSoundFile, so no extra gate is needed here.
-function die(msg) { console.error(`ERROR: ${msg}`); try { playErrorSound(); } catch {} process.exit(1); }
+// _playSoundFileSync, so no extra gate is needed here.
+// Uses _playSoundFileSync (spawnSync) so the wav completes before process.exit(1) kills the child.
+function die(msg) { console.error(`ERROR: ${msg}`); try { _playSoundFileSync('error-sound-file', 'Windows Critical Stop.wav'); } catch {} process.exit(1); }
 
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -566,17 +592,11 @@ function initHistoryFile(filePath, topicName) {
 }
 
 function parseLatestSection(filePath, headerPattern) {
+  // Delegate to pure extraction logic in fan-out.js, which masks code blocks
+  // and stops only at recognized section boundaries (not arbitrary ## headers)
+  // to avoid truncation when the agent's own sub-headers appear in the body.
   const content = fs.readFileSync(filePath, 'utf8');
-  const re = new RegExp(`^##\\s+${headerPattern}[^\\n]*$`, 'gim');
-  let lastMatch = null;
-  let m;
-  while ((m = re.exec(content)) !== null) lastMatch = m;
-  if (!lastMatch) return null;
-  const tail = content.slice(lastMatch.index + lastMatch[0].length);
-  // Stop at the next "## " header (any kind), else end-of-file.
-  const nextHeader = tail.search(/^##\s+/m);
-  const body = nextHeader >= 0 ? tail.slice(0, nextHeader) : tail;
-  return body.replace(/\n---\s*$/, '').trim() || null;
+  return extractLatestSection(content, headerPattern, ANY_RESPONSE_HEADER);
 }
 
 function parseConversationContext(filePath) {
@@ -899,14 +919,15 @@ function applyRateLimitDowngrade(modelId) {
   return { modelId, note: null };
 }
 
-// Returns true when modelId clearly belongs to a different provider than effectiveProvider
-// (e.g. a `gpt-*` id leaking into a claude-code spawn after a provider switch). Used by
-// resolveModel to substitute a safe in-tier default instead of forwarding the stale id.
+// Returns true when modelId is not valid for effectiveProvider — either a different-provider
+// namespace or a sub-floor version (e.g. gpt-4* under github-copilot where floor is gpt-5+).
+// Used by resolveModel to substitute a safe in-tier default or hard-abort on explicit config.
 function isModelIdForeignToProvider(modelId, effectiveProvider) {
   if (!modelId || typeof modelId !== 'string') return false;
   const lower = modelId.toLowerCase();
   if (effectiveProvider === 'claude-code') return /^(gpt-|gemini-|o\d)/.test(lower);
-  if (effectiveProvider === 'github-copilot') return /^(claude-|gemini-)/.test(lower);
+  // GPT-5 floor: gpt-4* family is not accepted for github-copilot regardless of namespace match.
+  if (effectiveProvider === 'github-copilot') return /^(claude-|gemini-)/.test(lower) || /^gpt-4/i.test(lower);
   if (effectiveProvider === 'gemini' || effectiveProvider === 'gemini-vertex') return /^(claude-|gpt-|o\d)/.test(lower);
   return false;
 }
@@ -961,10 +982,21 @@ async function resolveModel(configured, promptContent = '') {
     const note = downgrade.note ? `auto → ${family} (${downgrade.note})` : `auto → ${family}`;
     return { modelArgs: ['--model', resolved], fallbackNote: note };
   }
+  // Hard abort when the user explicitly configured a model that belongs to a different provider.
+  // Silent substitution masked misconfiguration; surfacing valid options lets the user fix the root cause.
   if (modelId && isModelIdForeignToProvider(modelId, effectiveProvider)) {
-    const sub = providerTiers.medium;
-    log(`Warning: configured model "${modelId}" is not valid for provider "${effectiveProvider}" — substituting ${sub}.`);
-    return { modelArgs: ['--model', sub], fallbackNote: `cross-provider id "${modelId}" → ${sub}` };
+    const validModels = [
+      `light:  ${providerTiers.light}`,
+      `medium: ${providerTiers.medium}`,
+      `heavy:  ${providerTiers.heavy}`,
+    ].join('\n        ');
+    log(
+      `ERROR: configured model "${modelId}" is not valid for provider "${effectiveProvider}".\n` +
+      `  Valid models for "${effectiveProvider}":\n` +
+      `        ${validModels}\n` +
+      `  Fix: set model to one of the above, set model to "auto", or switch providers in topic-config.json.`
+    );
+    process.exit(1);
   }
   if (modelId && modelId !== configured) {
     return { modelArgs: ['--model', modelId], fallbackNote: `"${configured}" → ${modelId}` };
@@ -1612,6 +1644,14 @@ async function runClaude(payload, { silent = false, label = 'harness-run-agent.j
         const note = `model "${attempted}" unavailable → fell back to ${fallbackModel}`;
         log(`[${label}] ${note}`);
         return provider.spawn(finalPayload, { ...spawnOpts, modelArgs: ['--model', fallbackModel], fallbackNote: note });
+      }
+      // When the medium-tier fallback equals the attempted model (e.g. static gpt-5 not yet in
+      // this user's Copilot plan), retry without --model so the CLI picks its account-default.
+      // Only applies to github-copilot; other providers have no meaningful "omit model" semantic.
+      if (provider.id === 'github-copilot') {
+        const note = `model "${attempted}" unavailable → omitting --model, using Copilot account default`;
+        log(`[${label}] ${note}`);
+        return provider.spawn(finalPayload, { ...spawnOpts, modelArgs: [], fallbackNote: note });
       }
       err.message = `Selected model "${attempted}" is unavailable for provider "${provider.id}". Edit topic-config.json \`models.<role>\` to pick a supported id.`;
     }
@@ -2894,8 +2934,8 @@ function isBulletFormatted(text) {
   // too verbose. Apply a tighter per-bullet length cap so wordy-but-bulleted
   // output is flagged for reformatting too, not just non-bulleted prose. Cap stays
   // lenient (600) when caveman is off so normal responses are not over-triggered.
-  const cavemanActive = !!(cavemanClause && cavemanClause.trim());
-  const maxBulletLen = cavemanActive ? 280 : 600;
+  // 600-char cap flags genuine run-on bullets without blocking verbatim technical statements.
+  const maxBulletLen = 600;
   // Remove fenced code blocks and any trailing "*Model: …*" usage footer first —
   // both are exempt from the bullet rule.
   let s = text.replace(/```[\s\S]*?```/g, '');
@@ -2921,9 +2961,14 @@ function isBulletFormatted(text) {
 // coding agent because only `r.text` is replaced by the caller.
 async function enforceBulletFormat(text, label) {
   if (isBulletFormatted(text)) return text;
+  // Clause order matches the coding payload (run-agent.js:2980): cavemanClause first,
+  // outputFormattingMandateClause last so the bullet mandate wins by recency.
+  // The explicit override sentence below ensures caveman terseness never removes
+  // bullet structure — it only governs wording WITHIN each bullet.
   const fmtSystem =
     'You are a formatter. Reformat the message into the mandated markdown bullet list. Preserve ALL technical content verbatim — add nothing, drop nothing, invent no facts. Output only the reformatted message.' +
-    outputFormattingMandateClause + (cavemanClause || '');
+    (cavemanClause || '') + outputFormattingMandateClause +
+    '\n\nCRITICAL PRECEDENCE: caveman mode controls only the WORDING inside each bullet (terse, compressed). The `- ` bullet prefix and ONE blank line between bullets are MANDATORY and override every other directive including caveman.';
   for (let attempt = 0; attempt < 2; attempt++) {
     const payload = buildPayload(globalRules, fmtSystem, 'Reformat the message below.', text, '');
     const r = await runClaude(payload, { silent: true, label, role: 'coding' });
@@ -3213,6 +3258,25 @@ function _playSoundFile(configKey, defaultWav) {
       return;
     }
   } catch { _beepInFlight = false; }
+}
+
+// Synchronous variant of _playSoundFile for use in die() where process.exit(1) follows
+// immediately. Skips _beepInFlight latch (no async lifecycle). Uses spawnSync so the
+// wav finishes playing before the process terminates. Same env guards apply.
+function _playSoundFileSync(configKey, defaultWav) {
+  if (process.env.AGENT_ORCH_TOPIC_DIR_OVERRIDE || process.env.AGENT_ORCH_BROKERED_CHILD) return;
+  if (typeof topic === 'string' && topic.startsWith('__e2e_stub')) return;
+  const enabled = configUtils.cfgRead(topicConfig, config, 'play-notification-sound', true);
+  if (enabled === false) return;
+  try {
+    if (process.platform === 'win32') {
+      const cfgVal = String(configUtils.cfgRead(topicConfig, config, configKey, defaultWav) || '').trim();
+      if (!cfgVal) return;
+      const wav = _resolveWavPath(cfgVal).replace(/'/g, "''");
+      const psCmd = `(New-Object Media.SoundPlayer '${wav}').PlaySync()`;
+      spawnSync('powershell', ['-NoProfile', '-Command', psCmd], { stdio: 'ignore', windowsHide: true });
+    }
+  } catch {}
 }
 
 // Event 1 — user response needed (clarifying questions). Plays the `.wav` at
@@ -4892,29 +4956,30 @@ async function dequeueAndTriggerNext({ manualSubmit = false } = {}) {
       appendAutoResumeLog(`dispatch: dequeue-gate pipelineResult=${JSON.stringify(pipelineResult)} -> drain=${_drainGate}`);
       if (_drainGate) await dequeueAndTriggerNext();
       // Last-prompt-pipeline-finished chime: fire ONCE per dispatch, ONLY when
-      // the queue is empty after drain returns (i.e., this dispatch processed
-      // the final available prompt). Re-reads queue length post-drain so
-      // "all-held" early-return and any held-only remainder do NOT chime —
-      // only a genuinely empty queue counts as "last prompt finished".
+      // no unheld (runnable) blocks remain after drain returns. Held blocks do
+      // not count — user explicitly parked them, so they are not "pending work".
       // Uses dedicated `playCompletionSound` (distinct .wav) so the
       // session-ending event has its own tone separate from clarifying/error.
       if (_drainGate) {
-        let _postDrainPending = -1;
-        try { _postDrainPending = promptQueue.queueLength(topicDirPath()); } catch {}
-        if (_postDrainPending === 0) {
-          try { playCompletionSound(); appendAutoResumeLog(`dispatch: completion-chime fired (queue empty post-drain pending=${_postDrainPending})`); }
+        // Hold-aware post-drain check: count only blocks that are not on hold.
+        // queueLength() counts ALL blocks including held ones — use parseQueue instead.
+        let _postDrainUnheld = -1;
+        try {
+          const { blocks: _postDrainBlocks } = promptQueue.parseQueue(topicDirPath());
+          _postDrainUnheld = _postDrainBlocks.filter(b => !b.held).length;
+        } catch {}
+        if (_postDrainUnheld === 0) {
+          try { playCompletionSound(); appendAutoResumeLog(`dispatch: completion-chime fired (no unheld blocks post-drain unheld=${_postDrainUnheld})`); }
           catch (chimeErr) { appendAutoResumeLog(`dispatch: completion-chime failed: ${chimeErr && chimeErr.message}`); }
         } else {
-          appendAutoResumeLog(`dispatch: completion-chime skipped (post-drain pending=${_postDrainPending} — not last prompt)`);
+          appendAutoResumeLog(`dispatch: completion-chime skipped (post-drain unheld=${_postDrainUnheld} — not last prompt)`);
         }
       }
     }
   } catch (err) {
     try { appendAutoResumeLog(`dispatch: outer-catch err="${err && err.message}" stack=${err && err.stack ? String(err.stack).split('\n').slice(0,3).join(' | ') : 'n/a'}`); } catch {}
     ensureAutoModelRestored();
-    // Audible cue: dispatch-level pipeline error -> dedicated error chime
-    // before `die()` exits so failure has a tone distinct from completion.
-    try { playErrorSound(); } catch {}
+    // die() now calls _playSoundFileSync directly — no separate async playErrorSound() needed.
     die(err.message);
   }
   ensureAutoModelRestored();

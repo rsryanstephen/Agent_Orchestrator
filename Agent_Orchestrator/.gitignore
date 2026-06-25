@@ -3,3 +3,4 @@ topic_files
 .tmp
 .last-topic
 .model-catalog-cache.json
+.env

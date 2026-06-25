@@ -55,12 +55,11 @@ test('supportsFeature: mcp=true, autoResume=false', () => {
 test('loginInstructions contains expected keywords', () => {
   const s = provider.loginInstructions();
   assert.ok(typeof s === 'string', 'must be string');
-  assert.ok(s.includes('copilot auth login'), 'must mention copilot auth login');
-  assert.ok(s.includes('copilot --version'), 'must mention verification command');
-  assert.ok(s.includes('~/.copilot/'), 'must mention auth persist path');
+  assert.ok(s.includes('github_pat_'), 'must mention fine-grained PAT format');
+  assert.ok(s.includes('COPILOT_GITHUB_TOKEN'), 'must mention env var name');
+  assert.ok(s.includes('gh auth'), 'must mention gh auth alternative');
   assert.ok(s.includes('300'), 'must mention Pro quota');
   assert.ok(s.includes('1500'), 'must mention Business quota');
-  assert.ok(/DO NOT use ['`]gh copilot['`]/i.test(s), 'must warn against gh copilot');
 });
 
 // ── parseCopilotLogEntry (schema isolation fn) ─────────────────────────────────
@@ -357,6 +356,8 @@ function makeFakeChild() {
   const ee = new EventEmitter();
   ee.stdout = new EventEmitter();
   ee.stderr = new EventEmitter();
+  // stdin stub — spawnCopilot now writes the prompt via child.stdin (not argv).
+  ee.stdin = { write() {}, end() {}, on() {} };
   return ee;
 }
 
@@ -439,6 +440,39 @@ test('spawnCopilot: post-hooks fire on child error too', () => {
   fakeChild.emit('error', new Error('spawn failed'));
 
   assert.ok(fired.includes('post'), 'post hook fires on child error');
+  provider._clearHooks();
+});
+
+test('spawnCopilot: prompt NOT in argv — fed via stdin to prevent ENAMETOOLONG', () => {
+  // Regression guard: -p <prompt> in argv overflows Windows cmd-line cap on large prompts.
+  // Prompt must be delivered via child.stdin, never as an argv element.
+  provider._clearHooks();
+  const BIG_PROMPT = 'unique-sentinel-' + 'x'.repeat(200);
+  let capturedArgs;
+  let stdinWritten = '';
+  const fakeChild = makeFakeChild();
+  // Override stdin to capture what gets written.
+  fakeChild.stdin = {
+    on() {},
+    write(data) { stdinWritten += data; },
+    end() {},
+  };
+  const { waitForExit } = provider.spawnCopilot({
+    prompt: BIG_PROMPT,
+    silent: true,
+    _spawn: (_bin, _args) => { capturedArgs = _args; return fakeChild; },
+  });
+
+  assert.ok(Array.isArray(capturedArgs), 'args must be captured by _spawn stub');
+  assert.ok(
+    !capturedArgs.some(a => a === BIG_PROMPT),
+    'full prompt string must NOT appear in argv (would cause ENAMETOOLONG)'
+  );
+  assert.ok(!capturedArgs.includes('-p'), '-p flag must NOT be present in argv');
+  assert.ok(stdinWritten.includes('unique-sentinel-'), 'prompt must be written to child.stdin');
+
+  waitForExit();
+  fakeChild.emit('close', 0);
   provider._clearHooks();
 });
 
@@ -829,25 +863,27 @@ test('parseStream: GA session.error quota -> error event with code error_quota',
 // ── spawnCopilot: copilot-cli-settings memory prefix ──────────────────────────
 
 // Helper: write a temp config JSON, run spawnCopilot with _spawn injection,
-// capture the -p argument, clean up. Returns the captured prompt string.
+// capture what is written to child.stdin (prompt delivery, not argv), clean up.
+// Returns the captured stdin string, or null if nothing was written.
 function runSpawnWithConfig(cfgObj, prompt) {
   const tmpCfg = path.join(os.tmpdir(), `copilot-test-cfg-${process.hrtime.bigint()}.json`);
   fs.writeFileSync(tmpCfg, JSON.stringify(cfgObj), 'utf8');
-  let captured = null;
+  let capturedStdin = '';
   try {
     const fakeChild = makeFakeChild();
+    // Capture stdin writes — prompt is now delivered via stdin, not argv.
+    fakeChild.stdin = { on() {}, write(d) { capturedStdin += d; }, end() {} };
     provider.spawnCopilot({
       prompt,
       silent: true,
-      _spawn: (_bin, args) => { captured = args; return fakeChild; },
+      _spawn: () => fakeChild,
       _configPath: tmpCfg,
     });
   } finally {
     try { fs.unlinkSync(tmpCfg); } catch {}
     provider._clearHooks();
   }
-  const pIdx = captured ? captured.indexOf('-p') : -1;
-  return pIdx >= 0 ? captured[pIdx + 1] : null;
+  return capturedStdin || null;
 }
 
 test('spawnCopilot: copilot-cli-settings memory:"on" prefixes prompt with /memory on', () => {

@@ -82,4 +82,40 @@ function nextPlannedSubtasksFromPlan(planText) {
   return Array.isArray(parsed) && parsed.length >= 2 ? parsed : null;
 }
 
-module.exports = { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER };
+// Extracts the text body of a section (header + content) from markdown.
+// Uses recognized section-boundary headers only (not arbitrary "## ") to prevent
+// false splits when agent sub-headers (e.g. `## Plan`, `## Verified Citations`)
+// appear inside the response body. Masks fenced code blocks before boundary search
+// to avoid mismatches when `##` appears inside code.
+//
+// Args:
+//   content: raw markdown string
+//   headerPattern: regex pattern matching the desired section header (e.g. "Planning Agent Response")
+//   anyResponseHeader: the ANY_RESPONSE_HEADER pattern string (for recognized boundaries)
+//
+// Returns: trimmed body text (without markdown `---` line), or null if header not found / body empty.
+function extractLatestSection(content, headerPattern, anyResponseHeader) {
+  const re = new RegExp(`^##\\s+${headerPattern}[^\\n]*$`, 'gim');
+  let lastMatch = null;
+  let m;
+  while ((m = re.exec(content)) !== null) lastMatch = m;
+  if (!lastMatch) return null;
+  const tail = content.slice(lastMatch.index + lastMatch[0].length);
+
+  // Mask fenced code blocks before searching for boundary headers, so a `##`
+  // inside ``` code ``` never falsely triggers a section split.
+  const MASK = '\x00##';
+  const masked = tail.replace(/`{3}[\s\S]*?`{3}/g, block => block.replace(/^##/gm, MASK));
+
+  // Stop at the next recognized section boundary: User Prompt, response headers, etc.
+  // Explicitly list recognized boundaries (NOT arbitrary `## `) to avoid truncation
+  // when agent sub-headers appear in the response body.
+  const boundaryRe = new RegExp(`^##\\s+(?:User Prompt(?:\\s+\\([^)\\n]*\\))?|User Reply to Questions|Auto Reply to Clarifying Questions|Auto Answer|${anyResponseHeader})\\s*$`, 'im');
+  const nextHeader = masked.search(boundaryRe);
+  const body = nextHeader >= 0 ? masked.slice(0, nextHeader) : masked;
+
+  // Unmask code blocks and clean trailing separators.
+  return body.replace(/\x00##/g, '##').replace(/\n---\s*$/, '').trim() || null;
+}
+
+module.exports = { splitPromptIntoTasks, parsePlanningSubtasks, nextPlannedSubtasksFromPlan, roleHeaderFor, ROLE_HEADER, extractLatestSection };

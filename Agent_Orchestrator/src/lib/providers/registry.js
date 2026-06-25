@@ -44,13 +44,22 @@ function _adaptModule(mod) {
           const model = Array.isArray(modelArgs) && modelArgs.length >= 2 ? modelArgs[1] : undefined;
 
           // Gap #2: enforce probe() before spawn() to catch auth mismatches early.
+          // Three-step recovery: probe → autoLogin if binary present but creds missing → re-probe.
           if (typeof mod.probe === 'function') {
-            const ok = mod.probe();
+            let ok = mod.probe();
+            let loginOk;
+            if (!ok && typeof mod.isBinaryInstalled === 'function' && mod.isBinaryInstalled()) {
+              if (typeof mod.autoLogin === 'function') {
+                loginOk = mod.autoLogin();
+              }
+              ok = !!mod.probe();
+            }
             if (!ok) {
               const hint = typeof mod.loginInstructions === 'function' ? mod.loginInstructions() : '';
               throw new Error(
-                `Provider "${mod.id}" failed pre-spawn probe — check auth/environment.\n` +
-                (hint ? hint + '\n' : '')
+                loginOk === true
+                  ? `Provider "${mod.id}" — OAuth completed but credentials not found in ~/.copilot/. Re-run without custom flags.`
+                  : `Provider "${mod.id}" failed pre-spawn probe — check auth/environment.\n` + (hint ? hint + '\n' : '')
               );
             }
           }

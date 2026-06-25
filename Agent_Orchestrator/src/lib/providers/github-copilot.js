@@ -141,7 +141,10 @@ function supportsFeature(name) {
 
 // ── Auth probe ────────────────────────────────────────────────────────────────
 
-function probe() {
+// Checks whether the copilot binary is reachable by running --version.
+// Separated from probe() so registry.js can distinguish binary-missing vs
+// credentials-missing failure modes and offer targeted recovery.
+function isBinaryInstalled() {
   const bin = 'copilot';
   let r = spawnSync(bin, ['--version'], {
     shell: false,
@@ -160,8 +163,88 @@ function probe() {
   return r.status === 0 && !r.error;
 }
 
+// Checks whether any supported GA auth credential is present.
+// Returns true when ANY of these conditions hold:
+//   (a) COPILOT_GITHUB_TOKEN env var is non-empty (set from .env loader in run-agent.js)
+//   (b) `gh auth token` returns a token (GitHub CLI authenticated) — token is exported
+//       into process.env.COPILOT_GITHUB_TOKEN so the spawned child inherits it
+// Windows Credential Manager read removed: interactive /login does not persist headlessly.
+// Generic GitHub tokens (GH_TOKEN, GITHUB_TOKEN) do not grant Copilot scope and are ignored.
+// Detects obvious placeholder/template token values shipped in the sample .env
+// (e.g. "github_pat_YOUR_ACTUAL_TOKEN_HERE"). probe() previously accepted any
+// non-empty string, so a placeholder made the provider report "usable" then fail
+// at runtime with 401 Bad credentials. Reject known placeholder markers so probe()
+// reflects real usability. Real PATs may contain uppercase, so we match marker
+// substrings rather than casing.
+function _isPlaceholderToken(token) {
+  const t = String(token || '').toLowerCase();
+  const markers = ['your_', '_here', 'placeholder', 'example', 'xxxx', 'changeme', 'replace', 'actual_token', 'your-token', 'dummy'];
+  return markers.some((m) => t.includes(m));
+}
+
+function _authCredentialsExist() {
+  // (a) env var — fastest check, no subprocess. Set via .env file or CI environment.
+  // Treat placeholder values as absent so probe() does not falsely report usable.
+  const tokenEnv = process.env.COPILOT_GITHUB_TOKEN || '';
+  if (tokenEnv.trim() && !_isPlaceholderToken(tokenEnv)) return true;
+
+  // (b) gh CLI fallback — reads the token from the authenticated gh session.
+  try {
+    const r = spawnSync('gh', ['auth', 'token'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    if (r.status === 0 && !r.error) {
+      const token = (r.stdout || '').trim();
+      if (token) {
+        process.env.COPILOT_GITHUB_TOKEN = token;
+        return true;
+      }
+    }
+  } catch {
+    // gh not installed or not authenticated — fall through.
+  }
+
+  return false;
+}
+
+// Binary check AND credential check must both pass for the provider to be usable.
+function probe() {
+  return isBinaryInstalled() && _authCredentialsExist();
+}
+
+// Copilot CLI interactive auth entry point (stub). The GA copilot CLI does not
+// support automated 'copilot auth login'; credentials must come from COPILOT_GITHUB_TOKEN
+// env var or the interactive /login slash command run inside a copilot session.
+// This function documents the path; in non-TTY contexts (CI/pipe), returns false and
+// prints setup instructions rather than attempting an automated flow that won't work.
+function autoLogin() {
+  // Non-interactive guard: no automated auth path exists for Copilot.
+  if (!process.stdout.isTTY) {
+    console.error('\n[github-copilot] autoLogin: no interactive terminal detected.\n');
+    console.error('[github-copilot] ' + loginInstructions() + '\n');
+    return false;
+  }
+  // Even in interactive mode, there is no automated CLI path for Copilot auth.
+  // The /login slash command requires a copilot session.
+  console.error('\n[github-copilot] No automated CLI auth available for Copilot GA.\n');
+  console.error('[github-copilot] ' + loginInstructions() + '\n');
+  return false;
+}
+
 function loginInstructions() {
-  return "Install GitHub Copilot CLI (standalone, public preview). Run 'copilot auth login' to authenticate (saves to ~/.copilot/). Verify with 'copilot --version'. Requires active Copilot subscription (Pro: 300 premium req/mo; Business: 1500/mo). DO NOT use 'gh copilot' — that is the legacy extension.";
+  const lines = [
+    'GitHub Copilot CLI (GA, standalone) auth — two supported options:',
+    '  (1) Fine-grained PAT (recommended): generate a github_pat_ token with "Copilot Requests: Read" permission',
+    '      then add COPILOT_GITHUB_TOKEN="github_pat_..." to Agent_Orchestrator/.env (never commit this file).',
+    '      Note: classic ghp_ tokens are rejected by the Copilot CLI — you must use a fine-grained PAT.',
+    '  (2) GitHub CLI: run `gh auth login` — the harness reads the token via `gh auth token` automatically.',
+    'Requires an active GitHub Copilot subscription (Pro: 300 premium req/mo; Business: 1500/mo).',
+    'See README.md → "GitHub Copilot Provider Auth Setup" for step-by-step instructions.'
+  ];
+  return lines.join('\n');
 }
 
 // ── Hook registry (Gap #6: JS callbacks instead of settings.json hook dispatch) ─
@@ -222,17 +305,32 @@ function spawnCopilot(opts) {
 
   for (const fn of _preHooks) { try { fn(); } catch {} }
 
-  const args = ['-p', effectivePrompt, '--allow-all-tools', '--log-dir', logDir];
+  // Prompt is fed via stdin, not argv, to avoid ENAMETOOLONG on Windows.
+  // Windows cmd.exe caps argv at ~8191 chars (shell:true path); large prompts with
+  // injected inline-skills routinely exceed this. -p is omitted so copilot reads
+  // the piped stdin as the non-interactive prompt input.
+  const args = ['--allow-all-tools', '--log-dir', logDir];
   if (model && model.trim()) args.push('--model', model.trim());
   if (mcpConfig && fs.existsSync(mcpConfig)) args.push('--mcp-config', mcpConfig);
+
+  // Child inherits process.env — COPILOT_GITHUB_TOKEN already set by _authCredentialsExist()
+  // (either from .env loader in run-agent.js or from `gh auth token` fallback).
+  const childEnv = process.env;
 
   const { bin, shell } = resolvecopilotBin();
   const child = spawnFn(bin, args, {
     cwd: cwd || process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin=pipe so effectivePrompt can be written after spawn without touching argv.
+    stdio: ['pipe', 'pipe', 'pipe'],
     shell,
     windowsHide: true,
+    env: childEnv,
   });
+
+  // Write prompt to stdin and close; suppress EPIPE if child exits before consuming all input.
+  child.stdin.on('error', () => {});
+  child.stdin.write(effectivePrompt, 'utf8');
+  child.stdin.end();
 
   const startMs = Date.now();
   const heartbeatTimer = silent ? null : setInterval(() => {
@@ -492,6 +590,9 @@ module.exports = {
   capabilities,
   supportsFeature,
   probe,
+  isBinaryInstalled,
+  autoLogin,
+  _authCredentialsExist,
   loginInstructions,
   spawnCopilot,
   parseStream,

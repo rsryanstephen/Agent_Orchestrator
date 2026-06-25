@@ -722,6 +722,34 @@ Located at `Agent_Orchestrator/global-config.json`. Top-level keys are **kebab-c
 - **claude-code:** full feature set. No config changes required from current setup.
 - **github-copilot:** Uses standalone `copilot` CLI (NOT `gh copilot`). Headless invocation: `copilot -p "<prompt>" --allow-all-tools --log-dir <dir>`. MCP and tool-use supported. No sub-agents, no skills runtime, no plan-mode, no auto-resume, no stream-json. Output structured via `--log-dir` JSONL. Premium-request quota applies (Pro: 300/mo; Business: 1500/mo). AGENTS.md auto-generated from CLAUDE.md+MEMORY at spawn. If you want one shared personal config across Claude Code, VS Code Copilot Chat, and Gemini, keep canonical content in `C:\Users\ryan.stephen\AppData\Roaming\Code\User\user_native_config.md`, list target files in `C:\Users\ryan.stephen\AppData\Roaming\Code\User\global_config_per_provider.md`, then run `node Agent_Orchestrator/src/sync-user-native-config.js` (or `hsync` after reinstalling shell functions). The sync overwrites each listed provider-native file. It applies target-specific fronting automatically: Claude/Gemini files get provider banner comments, while VS Code's `copilot-chat-always-on.instructions.md` target gets the required `applyTo: "**"` frontmatter so chat auto-load still works.
 
+### GitHub Copilot Provider Auth Setup
+
+The `github-copilot` provider requires a credential that headless `copilot` CLI invocations can read. Two supported paths:
+
+#### Option 1 — Fine-grained PAT (recommended)
+
+> **Important:** The Copilot CLI **does not accept** classic PATs (`ghp_`). You must generate a **fine-grained** PAT (`github_pat_`).
+
+1. On GitHub: **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+2. Set **Resource owner** to your personal account (not an org — the required permission is user-only).
+3. Under **Permissions → Account tab → Add permissions**, set **Copilot Requests** to **Read**.
+4. Copy the generated token (starts with `github_pat_`).
+5. Create or edit `Agent_Orchestrator/.env` and add:
+   ```
+   COPILOT_GITHUB_TOKEN="github_pat_YOUR_TOKEN_HERE"
+   ```
+6. Confirm `.env` is git-ignored (it is by default — never commit this file).
+
+The harness automatically loads `.env` at startup and makes the token available to the spawned `copilot` process.
+
+#### Option 2 — GitHub CLI (`gh`)
+
+1. Install the [GitHub CLI](https://cli.github.com/).
+2. Run `gh auth login` and follow the prompts.
+3. No `.env` entry needed — the harness reads the token via `gh auth token` automatically at runtime.
+
+---
+
 ### Alternative workflows for unsupported surfaces
 
 | Surface                 | claude-code                                       | github-copilot fallback                                                   |

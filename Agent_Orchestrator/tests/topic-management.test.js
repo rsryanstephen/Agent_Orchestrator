@@ -301,4 +301,47 @@ test('update-models-reference: regeneration produces identical content on re-run
   assert.strictEqual(after1, after2, 'update-models-reference.js must be idempotent');
 });
 
+test('update-models-reference: copilotTable() function present in source', () => {
+  assert.ok(/function copilotTable\(\)/.test(UPDATE_MODELS_SRC),
+    'copilotTable fn must exist in update-models-reference.js');
+});
+
+test('update-models-reference: title is "Models Reference" (not Claude-only)', () => {
+  assert.ok(/# Models Reference/.test(UPDATE_MODELS_SRC),
+    'title must be "# Models Reference" to cover all providers');
+  assert.ok(!/# Claude Models Reference/.test(UPDATE_MODELS_SRC),
+    'old Claude-only title must not be present');
+});
+
+test('update-models-reference: generated file contains GitHub Copilot section with gpt-5', () => {
+  const outPath = path.join(HARNESS, 'models-reference.md');
+  // Regenerate to ensure the file reflects current source.
+  const r = spawnSync(process.execPath, [path.join(HARNESS, 'src', 'update-models-reference.js')],
+    { encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, `update-models-reference.js failed: ${r.stderr}`);
+  const content = fs.readFileSync(outPath, 'utf8');
+  assert.ok(/GitHub Copilot Models/.test(content),
+    '"## GitHub Copilot Models" section missing from models-reference.md');
+  assert.ok(/gpt-5/.test(content),
+    'gpt-5 entry missing from GitHub Copilot section');
+});
+
+test('update-models-reference: GitHub Copilot section idempotent across regenerations', () => {
+  const outPath = path.join(HARNESS, 'models-reference.md');
+  const r1 = spawnSync(process.execPath, [path.join(HARNESS, 'src', 'update-models-reference.js')],
+    { encoding: 'utf8' });
+  assert.strictEqual(r1.status, 0, `first run failed: ${r1.stderr}`);
+  const content1 = fs.readFileSync(outPath, 'utf8');
+  const section1 = content1.slice(content1.indexOf('## GitHub Copilot Models'));
+
+  const r2 = spawnSync(process.execPath, [path.join(HARNESS, 'src', 'update-models-reference.js')],
+    { encoding: 'utf8' });
+  assert.strictEqual(r2.status, 0, `second run failed: ${r2.stderr}`);
+  const content2 = fs.readFileSync(outPath, 'utf8');
+  const section2 = content2.slice(content2.indexOf('## GitHub Copilot Models'));
+
+  assert.strictEqual(section1, section2,
+    'GitHub Copilot section must be identical across consecutive regenerations');
+});
+
 if (!process.exitCode) console.log('\nAll topic-management tests passed.');

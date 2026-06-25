@@ -143,12 +143,18 @@ function install({ force = false } = {}) {
     return { ok: false, reason: `No function definitions found in ${SOURCE}`, installedCount: 0, skippedCount: 0, failedCount: 1 };
   }
   const home = os.homedir();
+  // .bash_profile is included because Git Bash on Windows opens login shells that
+  // source .bash_profile but NOT .bashrc — without it, installed functions are invisible.
   const candidates = [
+    { shell: 'bash', file: path.join(home, '.bash_profile') },
     { shell: 'bash', file: path.join(home, '.bashrc') },
     { shell: 'zsh',  file: path.join(home, '.zshrc')  },
   ];
   const existing = candidates.filter(c => fs.existsSync(c.file));
-  const targets = existing.length > 0 ? existing : [candidates[0]];
+  // Always include .bash_profile (candidates[0]) so Git Bash login shells get the
+  // functions even when only .bashrc exists. Append any other already-existing rc
+  // files. The old conditional form skipped .bash_profile creation in that case.
+  const targets = [candidates[0], ...existing.filter(c => c.file !== candidates[0].file)];
   if (existing.length === 0) log(`No existing rc file found — will create ${targets[0].file}`);
 
   let installedCount = 0, skippedCount = 0, failedCount = 0;
@@ -247,14 +253,19 @@ if (fnNames.length === 0) {
 }
 
 const home = os.homedir();
+// .bash_profile is included because Git Bash on Windows opens login shells that
+// source .bash_profile but NOT .bashrc — without it, installed functions are invisible.
 const candidates = [
+  { shell: 'bash', file: path.join(home, '.bash_profile') },
   { shell: 'bash', file: path.join(home, '.bashrc') },
   { shell: 'zsh',  file: path.join(home, '.zshrc')  },
 ];
 
-// If neither file exists, create .bashrc (most common on Git Bash for Windows).
 const existing = candidates.filter(c => fs.existsSync(c.file));
-const targets = existing.length > 0 ? existing : [candidates[0]];
+// Always include .bash_profile (candidates[0]) so Git Bash login shells get the
+// functions even when only .bashrc exists. Append any other already-existing rc
+// files. The old conditional form skipped .bash_profile creation in that case.
+const targets = [candidates[0], ...existing.filter(c => c.file !== candidates[0].file)];
 if (existing.length === 0) {
   log(`No existing rc file found — will create ${targets[0].file}`);
 }

@@ -28,11 +28,12 @@ const STATIC_FALLBACKS = {
     medium: 'claude-sonnet-4-6',
     heavy:  'claude-opus-4-7',
   },
-  // gpt-5/gpt-5-mini are unavailable on Copilot CLI; gpt-4.1 family is the last confirmed-working GPT tier.
+  // GPT-5 floor enforced per user directive (Jun 2026). copilot --model gpt-5 confirmed accepted by CLI.
+  // gpt-4* family is explicitly excluded from selection; filter applied in selectTiers.
   'github-copilot': {
-    light:  'gpt-4.1-mini',
-    medium: 'gpt-4.1',
-    heavy:  'gpt-4.1',
+    light:  'gpt-5-mini',
+    medium: 'gpt-5',
+    heavy:  'gpt-5',
   },
   'gemini': {
     light:  'gemini-2.5-flash',
@@ -60,7 +61,7 @@ const TIER_RULES = {
     { tier: 'medium', pattern: /./ },
   ],
   'github-copilot': [
-    // heavy/medium: non-mini GPT flagship
+    // heavy/medium: non-mini GPT flagship (gpt-5+; gpt-4* filtered before reaching these rules)
     { tier: 'heavy',  pattern: /^gpt-\d+(?:\.\d+)?$/ },
     // light: mini or nano variants
     { tier: 'light',  pattern: /mini|nano|small/ },
@@ -168,6 +169,11 @@ const PROVIDER_FETCHERS = {
 // lexicographically largest ID (highest version number) within each tier.
 // ---------------------------------------------------------------------------
 function selectTiers(models, providerId) {
+  // Enforce GPT-5 floor for github-copilot: strip gpt-4* catalog ids from consideration
+  // so older catalog entries never drag tiers below gpt-5 even if the live catalog lists them.
+  if (providerId === 'github-copilot') {
+    models = models.filter((id) => !/^gpt-4/i.test(id));
+  }
   const rules = TIER_RULES[providerId] || TIER_RULES['claude-code'];
   const buckets = { heavy: [], medium: [], light: [] };
 
@@ -275,13 +281,19 @@ async function resolveProviderTiers(providerId, opts) {
     const models = await fetcher();
     const tiers  = selectTiers(models, providerId);
 
-    // Merge this provider into the existing cache (preserve other providers).
-    const existing = readCache() || { fetchedAt: Date.now(), providers: {} };
-    existing.providers[providerId] = { models, tiers };
-    existing.fetchedAt = existing.fetchedAt || Date.now();
-    writeCache(existing);
+    // Only persist to cache when at least one tier resolved — an all-null result
+    // (e.g. github-copilot catalog containing only gpt-4* after GPT-5 floor filter)
+    // must not poison the cache and block STATIC_FALLBACKS from kicking in next call.
+    if (tiers.heavy || tiers.medium || tiers.light) {
+      const existing = readCache() || { fetchedAt: Date.now(), providers: {} };
+      existing.providers[providerId] = { models, tiers };
+      existing.fetchedAt = existing.fetchedAt || Date.now();
+      writeCache(existing);
+      return tiers;
+    }
 
-    return tiers;
+    // All tiers null — fall through to static fallback without caching bad data.
+    return fallback;
   } catch (err) {
     // Demoted from warn -> debug: missing API keys are an expected fallback path
     // (e.g. planning phase runs without ANTHROPIC_API_KEY) and the prior 401 noise
@@ -357,4 +369,13 @@ function getCachedTier(providerId, tier) {
   return tiers[tier];
 }
 
-module.exports = { resolveProviderTiers, fetchAndCache, selectTiers, isModelAvailable, ensureFreshCache, getCachedTier };
+// Returns the cached model ID list for a provider, or [] when cache is absent/stale.
+// Prefer this over isModelAvailable(providerId, '__sentinel__') for read-only list access.
+function getKnownModels(providerId) {
+  const cached = readCache();
+  if (!cached || !cached.providers || !cached.providers[providerId]) return [];
+  const entry = cached.providers[providerId];
+  return Array.isArray(entry.models) ? entry.models : [];
+}
+
+module.exports = { resolveProviderTiers, fetchAndCache, selectTiers, isModelAvailable, ensureFreshCache, getCachedTier, getKnownModels };
