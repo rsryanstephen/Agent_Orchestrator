@@ -5,62 +5,48 @@ license: MIT
 ---
 # Karpathy Guidelines
 
-Behavioral guidelines to reduce common LLM coding mistakes, derived from [Andrej Karpathy&#39;s observations](https://x.com/karpathy/status/2015883857489522876) on LLM coding pitfalls.
+Reduce common LLM coding mistakes. [Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876).
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+Toward caution over speed. Judgment on trivial tasks.
 
 ## 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
 
 - State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
+- If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
 ## 2. Simplicity First
 
-**Minimum code that solves the problem. Nothing speculative.**
+Minimum code that solves the problem. Nothing speculative.
 
-- No features beyond what was asked.
+- No features beyond what user asked for.
 - No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
 - No error handling for impossible scenarios.
 - If you write 200 lines and it could be 50, rewrite it.
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+Senior engineer say overcomplicated? Simplify.
 
 ## 3. Surgical Changes
 
-**Touch only what you must. Clean up only your own mess.**
+Touch only what must.
 
-When editing existing code:
+Editing: No adjacent "improvements". Match style. Unrelated dead code? Mention it.
 
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+You make unused imports/variables/functions? Remove them. Pre-existing dead code? Leave.
 
-When your changes create orphans:
-
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
+Test: Changed line trace to request? Yes/no.
 
 ## 4. Goal-Driven Execution
 
-**Define success criteria. Loop until verified.**
+Define success. Loop until verified.
 
-Transform tasks into verifiable goals:
-
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
+Tasks → verifiable goals:
+- "Add validation" → test invalid inputs, make pass
+- "Fix bug" → reproduce in test, make pass
+- "Refactor X" → tests pass before/after
 
 ```
 1. [Step] → verify: [check]
@@ -68,4 +54,4 @@ For multi-step tasks, state a brief plan:
 3. [Step] → verify: [check]
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+Strong criteria independent loop. Weak ("make work") needs clarification.

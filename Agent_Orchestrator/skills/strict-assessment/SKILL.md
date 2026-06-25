@@ -7,30 +7,16 @@ description: >
   regressions. Use when the assessment agent must be maximally skeptical.
 ---
 
-## Mindset
+Default verdict: WRONG. Burden of proof on code. Verify every claim.
 
-Default verdict: WRONG. Coding agent finding right answer = exception, not norm. Burden of proof on the code, not on you.
+**Verify the diff:** Re-derive whether changes resolve requirements. Do not trust agent summary.
 
-## Hunting Rules
+**Test all inputs:** For each changed line, ask what input breaks it (null, empty, boundary, unicode, concurrent, cancellation, schema mismatch). For each requirement, name a test that fails if skipped.
 
-- Treat every "fixed" claim as unverified. Open the diff and re-derive whether the change actually resolves the requirement — do not trust the summary.
+**Audit scope:** Check what was NOT changed (call sites, serializers, migrations, docs, flags, telemetry). Flag silent behavior shifts (exception types, log levels, retry values, defaults, public surface). **Exception:** ignore config-key diffs in `global-config.json`, `topic-config.json` unless agent claims authorship.
 
-- For every changed line, ask: what input makes this branch wrong? Null. Empty. Boundary off-by-one. Unicode. Concurrent write. Cancellation. Deserialization with unexpected schema.
+**Verify assumptions:** Stated facts ("safe because X") must hold for ALL callers, not just the one in diff. Hunt regressions in shared helpers, state, config, DI.
 
-- For every requirement in the prompt, ask: which test would FAIL if the coding agent silently skipped it? If you cannot name such a test, the requirement is unverified.
+**Report:** Issue = (1) failing assumption, (2) concrete input/scenario, (3) file:line, (4) severity (blocker/risk/nit). No praise. Silence = clean.
 
-- Look for what was NOT changed but should have been: call sites of edited methods, serializers, fixtures, migrations, docs, feature flags, telemetry.
-
-- Flag silent behavior changes: exception types swapped, log levels lowered, retry/timeout values altered, defaults changed, public surface narrowed. Exception: harness config files (`global-config.json`, `topic-config.json`) — the user may edit these concurrently while agents run; ignore config-key diffs unless the coding agent's summary explicitly claims authorship.
-
-- Challenge assumptions stated as fact ("this is safe because X") — verify X holds for all callers, not just the one in the diff.
-
-- Hunt regressions in adjacent features: shared helpers, shared state, shared config keys, shared DI registrations.
-
-## Output Format
-
-For each issue, state: (1) the assumption that fails, (2) the concrete input/scenario that breaks it, (3) the file:line, (4) severity (blocker / risk / nit). Do not pad with praise. Skip "looks good" — silence on a topic means no issue found.
-
-## Exit Criteria
-
-Only mark assessment "clean" when: every requirement traces to a verifiable change, no untested branch was added, no public behavior shifted without intent, and no adjacent caller was orphaned.
+**Clean:** Every requirement → verifiable change. No untested branches. No silent public behavior shifts. No orphaned callers.

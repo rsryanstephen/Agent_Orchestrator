@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Hard topic removal utility.
+ * Topic archival utility.
  * Usage: node Agent_Orchestrator/remove-topic.js <topic|id|all>
  *
- * all       – deletes ALL topic folders under <topic-files-dir>/ and resets topics/ids in global-config.json
- * topic|id  – deletes <topic-files-dir>/<topic>/ and removes the topic from global-config.json
+ * all       – moves ALL topic folders into <topic-files-dir>/Archived/ and resets topics/ids in global-config.json
+ * topic|id  – moves <topic-files-dir>/<topic>/ into <topic-files-dir>/Archived/ and removes the topic from global-config.json
  */
 
 'use strict';
@@ -29,18 +29,25 @@ const config = configUtils.loadConfig(configPath);
 if (config.__hasComments) log('Note: JSONC comments will be stripped on write.');
 const topicFilesDir = configUtils.resolveTopicFilesDir(config);
 
-// Filesystem delete helper — recursive rmdir of the topic's folder.
+// Moves the topic's folder into <topic-files-dir>/Archived/ instead of deleting it.
+// If a same-named folder already exists in Archived, appends a timestamp suffix to avoid collisions.
 function deleteTopicDir(topicName) {
   const dir = path.join(ROOT, topicFilesDir, topicName);
-  if (fs.existsSync(dir)) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-      log(`Deleted: ${topicFilesDir}/${topicName}/`);
-    } catch (err) {
-      log(`Failed to delete ${topicFilesDir}/${topicName}/: ${err.message}`);
-    }
-  } else {
+  if (!fs.existsSync(dir)) {
     log(`Directory not found, skipped: ${topicFilesDir}/${topicName}/`);
+    return;
+  }
+  const archivedBase = path.join(ROOT, topicFilesDir, 'Archived');
+  fs.mkdirSync(archivedBase, { recursive: true });
+  let dest = path.join(archivedBase, topicName);
+  if (fs.existsSync(dest)) {
+    dest = path.join(archivedBase, `${topicName}-${Date.now()}`);
+  }
+  try {
+    fs.renameSync(dir, dest);
+    log(`Archived: ${topicFilesDir}/${topicName}/ -> ${topicFilesDir}/Archived/${path.basename(dest)}/`);
+  } catch (err) {
+    log(`Failed to archive ${topicFilesDir}/${topicName}/: ${err.message}`);
   }
 }
 

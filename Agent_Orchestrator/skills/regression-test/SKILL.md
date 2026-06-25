@@ -9,33 +9,33 @@ description: >
 
 ## Mindset
 
-A passing test that exercises no real code path is worse than no test — it grants false confidence. Every regression test must FAIL if the bug it guards re-appears, and PASS only because the public behaviour is correct. Drive the public surface, not the source text.
+A test exercising no real code path grants false confidence. Every regression test must FAIL if the bug re-appears; PASS only because behaviour is correct. Drive public surface, not source text.
 
 ## Hard Rules (each maps to a confirmed diagnostic hypothesis)
 
-- H1 — NO source-string assertions. Do NOT `readFileSync('src/run-agent.js')` then assert `src.includes(...)` / `src.match(/.../)` / `SRC.includes(...)`. Refactoring the wiring must be able to break the test. Instead call the exported function (e.g. `buildSystemPrompt(role)`, `resolveModel(...)`) or spawn `node src/run-agent.js` and assert on the returned value / stdout / written file.
+- H1 — NO source-string assertions. Refactoring must break test; call exported fn not src text via `readFileSync()`.
 
-- H2 — Cover the mid-layer, not just isolated units. Do NOT extract a function via `new Function('fs','path',...)` factories and test it in a vacuum. Wire through the real module export (`require`, `child_process.fork`) so call-site bugs (wrong cascade, missing `await`, exit-handler races) are caught.
+- H2 — Cover mid-layer via real module export (require, child_process.fork), not factories; catches call-site bugs (wrong cascade, missing await).
 
-- H3 — Parameterise the matrix, not one shape. When behaviour varies by provider × role × model-config (or any axis the code branches on), drive each cell. Do not hard-code a single non-TTY broker, one provider, or only `subAgents` true/false — vary every capability the code reads (`planMode`, `skillsRuntime`, `autoResume`, ...).
+- H3 — Parameterise the matrix (provider × role × config); vary every capability the code branches on, not single hard-coded shapes.
 
-- H4 — Assert user-visible behaviour, not internal call shape. Do NOT reach into private seams (`broker._state`, `broker._enqueue`, `_pendingQuestions`) or instrument globals (`setInterval` called once with `5000`). Drive the public entry (`broker.start()`) and assert observable outputs: stdout ordering, payloads sent to children, exit codes, written files.
+- H4 — Assert observable outputs (stdout, payloads, exit codes, files), not private seams (_state, _enqueue); drive public entry not internals.
 
-- H5 — Provide end-to-end prompt→history coverage where the change touches the pipeline. At least one test should plant a real `## User Prompt` in a temp `topic_files/<topic>/`, run the full pipeline (stubbed provider), and assert the resulting `## Coding Agent Response` block was appended, archive triggered, queue dequeued.
+- H5 — End-to-end prompt→history coverage: plant real `## User Prompt` in temp `topic_files/<topic>/`, run full pipeline, assert `## Coding Agent Response` appended and archive/queue triggered.
 
-- H7 — Failing-first, per-bug. Each bug fix ships with a behavioural test that FAILS on the pre-fix code and PASSES after. Name it for the bug (`*-regression.test.js` / `*-bug.test.js`), and add a comment quoting the VERBATIM requirement / issue it locks. No source-grep-only regression tests.
+- H7 — Failing-first per-bug: test FAILS on pre-fix, PASSES after; name for bug; quote VERBATIM requirement. No source-grep-only tests.
 
 ## Procedure
 
-1. Before writing the test, name the exact input that makes the bug re-appear and the exact observable output that proves it fixed. If you cannot, you are not testing behaviour.
+1. Name exact input + observable output proving fix; cannot test behaviour without both.
 
-2. Reach the code under test through its public surface only — exported function call or spawned process. If the only way to test it is a private field or a `new Function` factory, treat that as a design smell and prefer wiring through the real entry point.
+2. Public surface only (exported fn, spawned process); private fields = design smell — wire through real entry point.
 
-3. Cover boundaries: null, empty, off-by-one, unicode, concurrent write, cancellation, unexpected schema. One happy-path assertion is not a regression test.
+3. Cover boundaries: null, empty, off-by-one, unicode, concurrent write, cancellation, unexpected schema.
 
-4. For multi-axis behaviour, build the cell list explicitly and loop — assert every cell, and `log`/comment any axis you deliberately skip (no silent truncation).
+4. Multi-axis behaviour: explicit cell-list loop; assert all cells, log any deliberate skips (no silent truncation).
 
-5. Run the full suite and confirm green before declaring done. A test that cannot be run is not a test.
+5. Full suite green before done; untestable code is not tested.
 
 ## Anti-patterns (reject on sight)
 
@@ -47,4 +47,4 @@ A passing test that exercises no real code path is worse than no test — it gra
 
 ## Exit Criteria
 
-Test is acceptable only when: it drives the public surface (no source-grep, no factory, no private field), it would FAIL on the unfixed code, it covers the relevant input boundaries and matrix cells, and the full suite is green.
+Public surface (no grep/factory/privates) → FAILS on unfixed code → covers boundaries + matrix → full suite green.
