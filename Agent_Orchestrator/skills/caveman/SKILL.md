@@ -19,6 +19,10 @@ Drop: articles (a/an/the), filler (just/really/basically/actually/simply), pleas
 
 Technical terms exact. Code unchanged. Errors quoted exact.
 
-Pattern: `[thing] [action] [reason]. [next]`.
+Bullets: when a bullet/markdown formatting mandate is active, output MUST use `- ` bullets. Caveman compresses words INSIDE each bullet — never removes bullet structure. Pattern within a bullet: `[thing] [action] [reason]`.
 
-Example: "Bug in auth middleware. Token expiry: `<` not `<=`. Fix: ..."`
+Example (bulleted):
+
+- Bug: auth middleware. Token expiry `<` not `<=`.
+
+- Fix: change operator to `<=` in `auth/middleware.js:42`.
