@@ -27,12 +27,13 @@ function parseCopilotLogEntry(entry) {
   if (!t) return null;
   const d = entry.data || {};
 
-  // GA: assistant.message { data.content } — legacy: message/text/assistant with entry.text
+  // GA: assistant.message { data.content, data.outputTokens } — legacy: message/text/assistant with entry.text
   if (t === 'assistant.message' || t === 'message' || t === 'text' || t === 'assistant' || t === 'assistant_message') {
     const text = d.content || d.text || entry.text || entry.content || entry.message || '';
     if (!text) return null;
     const finishReason = d.finishReason || d.finish_reason || d.stopReason || d.stop_reason || entry.finish_reason || null;
-    return { kind: 'assistant_text', text: String(text), model: d.model || entry.model || null, finishReason };
+    const outputTokens = d.outputTokens ?? d.output_tokens ?? entry.output_tokens ?? null;
+    return { kind: 'assistant_text', text: String(text), model: d.model || entry.model || null, finishReason, outputTokens };
   }
 
   // GA: tool.request { data.toolCallId, data.name, data.arguments } — legacy: tool_call
@@ -101,6 +102,18 @@ function parseCopilotLogEntry(entry) {
       kind: 'error',
       code: isAuth ? 'error_auth' : (entry.code || 'error_unknown'),
       message: entry.message || 'Unknown error',
+    };
+  }
+
+  // GA: result { data.usage } — end-of-turn summary event. Fires usage accumulation in parseStream.
+  if (t === 'result') {
+    const u = d.usage || {};
+    return {
+      kind: 'usage',
+      input_tokens: u.inputTokens ?? entry.input_tokens ?? null,
+      output_tokens: u.outputTokens ?? entry.output_tokens ?? null,
+      cache_read_tokens: u.cacheReadTokens ?? entry.cache_read_tokens ?? null,
+      cache_write_tokens: u.cacheWriteTokens ?? entry.cache_write_tokens ?? null,
     };
   }
 
@@ -329,11 +342,10 @@ function spawnCopilot(opts) {
 
   for (const fn of _preHooks) { try { fn(); } catch {} }
 
-  // Prompt is fed via stdin, not argv, to avoid ENAMETOOLONG on Windows.
-  // Windows cmd.exe caps argv at ~8191 chars (shell:true path); large prompts with
-  // injected inline-skills routinely exceed this. -p is omitted so copilot reads
-  // the piped stdin as the non-interactive prompt input.
-  const args = [_resolveToolsFlag(spawnSyncFn), '--log-dir', logDir];
+  // Prompt fed via -p flag. Avoids ENAMETOOLONG on Windows by not writing to argv.
+  // Copilot CLI requires -p for non-interactive mode; stdin-only path is undocumented/non-functional.
+  // --output-format json sends JSONL events (assistant.message, result, etc.) to stdout.
+  const args = [_resolveToolsFlag(spawnSyncFn), '--log-dir', logDir, '--output-format', 'json', '-p', effectivePrompt];
   if (model && model.trim()) args.push('--model', model.trim());
   if (mcpConfig && fs.existsSync(mcpConfig)) args.push('--mcp-config', mcpConfig);
 
@@ -344,17 +356,18 @@ function spawnCopilot(opts) {
   const { bin, shell } = resolvecopilotBin();
   const child = spawnFn(bin, args, {
     cwd: cwd || process.cwd(),
-    // stdin=pipe so effectivePrompt can be written after spawn without touching argv.
     stdio: ['pipe', 'pipe', 'pipe'],
     shell,
     windowsHide: true,
     env: childEnv,
   });
 
-  // Write prompt to stdin and close; suppress EPIPE if child exits before consuming all input.
-  child.stdin.on('error', () => {});
-  child.stdin.write(effectivePrompt, 'utf8');
-  child.stdin.end();
+  // Accumulate stdout: --output-format json sends JSONL events (assistant.message, result, etc.) to stdout.
+  // Registry.js passes getStdout() to parseStream as 4th arg; parseStream uses it to split/parse JSONL lines.
+  let stdoutBuf = '';
+  if (child.stdout) {
+    child.stdout.on('data', (d) => { stdoutBuf += d.toString(); });
+  }
 
   const startMs = Date.now();
   const heartbeatTimer = silent ? null : setInterval(() => {
@@ -372,7 +385,7 @@ function spawnCopilot(opts) {
     child.on('error', () => { _runPostHooks(); resolve(1); });
   });
 
-  return { child, logDir, waitForExit };
+  return { child, logDir, waitForExit, getStdout: () => stdoutBuf };
 }
 
 // ── JSONL reader ──────────────────────────────────────────────────────────────
@@ -403,9 +416,12 @@ function readLogDirJsonl(logDir) {
  * stderrBuf: accumulated stderr text (for error detection).
  * Returns array of normalized event objects.
  */
-function parseStream(exitCode, logDir, stderrBuf, opts) {
+function parseStream(exitCode, logDir, stderrBuf, optsOrStdout) {
   const now = Date.now();
   const events = [];
+  // Accept optsOrStdout: if string, treat as stdout buffer; else treat as opts object (backward compat).
+  const stdoutBuf = typeof optsOrStdout === 'string' ? optsOrStdout : '';
+  const opts = typeof optsOrStdout === 'object' && optsOrStdout !== null ? optsOrStdout : {};
   const enableStopReasonFallback = !!(opts && opts.enableStopReasonFallback);
   let finishReason = null;
 
@@ -425,7 +441,24 @@ function parseStream(exitCode, logDir, stderrBuf, opts) {
     return events;
   }
 
-  const rawEntries = readLogDirJsonl(logDir || '');
+  // If stdoutBuf is non-empty, parse JSONL from stdout; otherwise fall back to logDir.
+  let rawEntries = [];
+  if (stdoutBuf) {
+    try {
+      rawEntries = stdoutBuf.split('\n')
+        .map(line => line.trim())
+        .filter(line => line)
+        .map(line => {
+          try { return JSON.parse(line); } catch { return null; }
+        })
+        .filter(e => e !== null);
+    } catch {
+      // If stdout parsing fails, fall back to logDir.
+      rawEntries = readLogDirJsonl(logDir || '');
+    }
+  } else {
+    rawEntries = readLogDirJsonl(logDir || '');
+  }
   let usageAccum = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, ratelimit: null };
   let quotaError = null;
 
@@ -438,6 +471,7 @@ function parseStream(exitCode, logDir, stderrBuf, opts) {
     switch (parsed.kind) {
       case 'assistant_text':
         if (parsed.finishReason) finishReason = parsed.finishReason;
+        if (parsed.outputTokens != null) usageAccum.output_tokens = (usageAccum.output_tokens || 0) + parsed.outputTokens;
         events.push({
           type: 'assistant_text',
           ts,

@@ -1,10 +1,13 @@
 {
   "// provider": "Active LLM provider. One of: `claude-code` (default, full feature set) | `github-copilot` (standalone `copilot` CLI, sub-agents/plan-mode/skills emulated by harness) | `gemini` (standalone `gemini` CLI, requires `GEMINI_API_KEY` or `gemini auth`) | `gemini-vertex` (Gemini via Vertex AI ADC, requires `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login`). Run `node Agent_Orchestrator/src/run-agent.js --probe` to verify auth after switching.",
   "provider": "claude-code",
+  "fallback-providers": [
+    "github-copilot"
+  ],
   "// harness-root": "Absolute path to the single Agent_Orchestrator instance (the inner dir holding `src/` and `shell-functions.txt`). `install-shell-functions.js` substitutes this for the `{{HARNESS_ROOT}}` placeholder so the installed rc functions use absolute paths and work from ANY repo — no per-repo copy needed. Empty/absent -> installer self-detects via the script location. Use forward slashes on Windows (e.g. `C:/Users/you/Repos/Agent_Orchestrator/Agent_Orchestrator`).",
-  "harness-root": "~/Repos/Agent_Orchestrator/Agent_Orchestrator",
+  "harness-root": "C:/Users/ryan.stephen/Repos/Agent_Orchestrator/Agent_Orchestrator",
   "// auto-install-shell-functions": "When true, the harness runs `install-shell-functions.js` automatically on startup to keep the shell rc file in sync with the current `shell-functions.txt`. Set false to manage shell function installation manually.",
-  "auto-install-shell-functions": true,
+  "auto-install-shell-functions": false,
   "// topic-files-dir": "Root directory (relative to the repo root) where per-topic subdirectories live. Each topic subdirectory holds the prompt/history markdown file and optional `topic-config.json` overrides. Change only if you relocate topic files.",
   "topic-files-dir": "Agent_Orchestrator/topic_files",
   "// topic-ids": "Numeric-ID -> topic-name map. Replaces legacy `ids` + redundant `topics` registry. Topic existence is derived from values of this map (and the on-disk topic-files-dir).",
@@ -47,9 +50,9 @@
   "// auto-context": "When true, the harness automatically injects the relevant topic context files (listed in the topic-config.json `context` array) into each agent invocation. Set false to suppress context injection entirely.",
   "auto-context": true,
   "// max-context-lifespan": "Number of pipeline runs a cached context block remains valid before the harness forces a refresh. Higher values reduce re-reads; lower values keep injected context fresher.",
-  "max-context-lifespan": 5,
+  "max-context-lifespan": 15,
   "// max-history-lines": "When a history file exceeds this many lines after an agent append, a compress-history directive is prepended to the topic's prompt queue (runs after the current pipeline completes, does not block subsequent phases). Uses compress-memory.js to summarise via Claude.",
-  "max-history-lines": 3000,
+  "max-history-lines": 2500,
   "// max-concurrent-agents": "Global cap on how many agent processes can run simultaneously across all topics. Shared semaphore — distinct from `max-parallel-agents-per-topic` (intra-topic fan-out) and `max-parallel-agents` (queue batch cross-topic cap).",
   "max-concurrent-agents": 4,
   "// max-parallel-agents-per-topic": "Cap on concurrent coding/assessment/fix agents fanned out within a single topic (default 4, 1 disables parallel mode). Topic-level value overrides this global via the standard cascade.",
@@ -94,7 +97,6 @@
   },
   "// provide-native-config-to-agents": "Controls whether the provider's own native global config is injected into the harness-built context. When true: ~/.copilot/copilot-instructions.md (Copilot), ~/.gemini/GEMINI.md (Gemini), or ~/.claude/CLAUDE.md (Claude Code) is read and merged into the agent context, then the original file is suppressed so the provider does not double-load it. When false (default): the native config file is still suppressed for Copilot and Gemini (harness isolation), and CLAUDE.md loads naturally for Claude Code. WARNING: if use-caveman, use-karpathy, use-interrogate, or use-strict-assessment are enabled AND this is true, those skill bodies may appear twice (once from the harness system prompt, once from the injected native config).",
   "​provide-native-config-to-agents": false,
-  
   "// stage-and-commit": "When true, the harness automatically stages all modified files and creates a git commit after a successful pipeline run. When false (default), changes are left unstaged — the user commits manually.",
   "stage-and-commit": false,
   "// network-retry": "Transient-network resilience for `runClaude` spawns. `maxAttempts` caps total tries; `backoffMs` is the per-attempt sleep schedule (last entry repeats if attempts > entries). On all attempts failing the pipeline saves resume-state, enqueues a wake job, prints an `hresume` banner, and exits non-zero — no schtasks/at registered because wake time is unknown.",

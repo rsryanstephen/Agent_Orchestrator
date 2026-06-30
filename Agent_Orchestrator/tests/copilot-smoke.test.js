@@ -92,11 +92,11 @@ test('(CS4) done event present as last event on success', () => {
   assert.ok(last && last.type === 'done', 'Last event must be "done"');
 });
 
-test('(CS5) error_quota event when exitCode!=0 and stderr contains "quota"', () => {
+test('(CS5) error event with code:error_quota when exitCode!=0 and stderr contains "quota"', () => {
   const logDir = writeLogDir([]);
   const events = copilot.parseStream(1, logDir, 'Error: quota exceeded for this billing period');
-  const quota = events.find(e => e.type === 'error_quota');
-  assert.ok(quota, 'Expected an error_quota event when stderr mentions quota');
+  const quota = events.find(e => e.type === 'error' && e.content.code === 'error_quota');
+  assert.ok(quota, 'Expected an error event with code:error_quota when stderr mentions quota');
 });
 
 // CS6: verify the path derivation helper used in registry.js
@@ -116,6 +116,25 @@ test('(CS6) registry _claudeProjectDirName maps Windows path correctly', () => {
   const input = 'C:\\Users\\ryan.stephen\\Repos\\AMA\\homestead-exporter-reports';
   const expected = 'c--Users-ryan-stephen-Repos-AMA-homestead-exporter-reports';
   assert.strictEqual(claudeProjectDirName(input), expected);
+});
+
+// CS7: parseStream accepts GA-format JSONL stdout buffer as 4th arg (string)
+// and produces correct assistant_text and usage events without needing logDir.
+test('(CS7) parseStream parses GA-format JSONL from stdout buffer (string arg)', () => {
+  const stdoutBuf = [
+    JSON.stringify({ type: 'assistant.message', data: { content: 'hello from GA format', outputTokens: 10 } }),
+    JSON.stringify({ type: 'result', data: { usage: { outputTokens: 10 } } }),
+    JSON.stringify({ type: 'session.end' }),
+  ].join('\n') + '\n';
+
+  const events = copilot.parseStream(0, '', '', stdoutBuf);
+  const texts = events.filter(e => e.type === 'assistant_text');
+  assert.ok(texts.length > 0, 'Expected at least one assistant_text event from stdout');
+  assert.ok(texts.some(e => (e.content && e.content.text || '').includes('hello from GA format')), 'assistant_text must include "hello from GA format"');
+
+  const usage = events.find(e => e.type === 'usage');
+  assert.ok(usage, 'Expected a usage event');
+  assert.ok(usage.content.output_tokens > 0, 'output_tokens should be accumulated from assistant.message + result');
 });
 
 // Cleanup

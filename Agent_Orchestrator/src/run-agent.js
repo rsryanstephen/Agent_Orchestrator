@@ -1325,7 +1325,10 @@ function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd =
   // Structurally exclude the active history file — it's already embedded in the User
   // Prompt; leaving it listed lets the agent enumerate the topic dir and read the full
   // thread, biasing its response toward the conversation rather than the queued prompt.
-  const filtered = activeHistoryRel ? paths.filter(p => p !== activeHistoryRel) : paths;
+  // Also exclude harness-owned paths from the topic context list. Those files describe
+  // the harness itself, not the user's root-repo, and stale auto-context entries there
+  // distract planning/coding agents from the actual project work.
+  const filtered = paths.filter(p => p !== activeHistoryRel && !isHarnessOwnedContextPath(p, baseRoot));
   // Compare the agent cwd against the resolution base (root-repo), not the hardcoded ROOT,
   // so relative paths are kept whenever the agent runs in the same dir we resolve against.
   const useAbsolute = agentCwd && path.resolve(agentCwd) !== path.resolve(baseRoot);
@@ -1371,11 +1374,39 @@ function buildContextSection(contextEntries, activeHistoryRel = null, agentCwd =
   return `## Topic Context (prioritize reading and editing these files)\nCRITICAL: ${rootHint}\nCRITICAL: Always read and check the root-repo and the context files listed below FIRST before searching the codebase. Do NOT scan or enumerate the whole repo, and do NOT search for files to modify, until you have first checked these context locations.\n${harnessHint}\n${lines.map(l => `- ${l}`).join('\n')}${historyNote}`;
 }
 
+// Normalize repo-relative paths and detect when a candidate points at the harness tree
+// itself. Auto-context must ignore harness-owned paths so topic-config.json stays focused
+// on the user's root-repo even when the harness lives inside that repo.
+// Two-branch guard: primary (harness relative to baseRoot) and fallback (ROOT-anchored).
+// The fallback catches git-output paths that are ROOT-relative even when baseRoot is external.
+function isHarnessOwnedContextPath(relPath, baseRoot = ROOT) {
+  if (typeof relPath !== 'string' || !relPath.trim()) return false;
+  const normalize = s => s.replace(/\\/g, '/').replace(/\/+$/, '').replace(/^\.\/+/, '');
+  const harnessRel = normalize(path.relative(baseRoot, HARNESS));
+
+  // Primary branch: if harness is relative to baseRoot (not external), use relative check
+  if (harnessRel && harnessRel !== '.' && !harnessRel.startsWith('../') && !path.isAbsolute(harnessRel)) {
+    const candidate = normalize(relPath);
+    if (candidate === harnessRel || candidate.startsWith(harnessRel + '/')) {
+      return true;
+    }
+  }
+
+  // Fallback branch: resolve relPath against ROOT and check against absolute HARNESS.
+  // This ensures the guard fires even when baseRoot (repoRoot) is external to the harness git tree.
+  const absFromRoot = path.resolve(ROOT, relPath);
+  const normHarness = path.normalize(HARNESS);
+  if (absFromRoot === normHarness || absFromRoot.startsWith(normHarness + path.sep)) {
+    return true;
+  }
+
+  return false;
+}
+
+// Capture git-modified paths from the topic's `root-repo`, not the harness repo,
+// so auto-context learns user-project directories instead of `Agent_Orchestrator/*`.
 function recordTouchedFiles() {
-  // touchedDirs are resolved against ROOT (see path.join(ROOT, candidate) below), so this
-  // git status MUST run with cwd: ROOT. Using repoRoot when root-repo != ROOT would yield
-  // paths relative to a foreign repo that never exist under ROOT, recording nothing.
-  const result = spawnSync('git', ['status', '--short', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
+  const result = spawnSync('git', ['status', '--short', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' });
   if (result.status !== 0 || !result.stdout.trim()) return;
   // Strip UTF-8 BOM (git on Windows may emit one at the start of stdout).
   // Split without trimming the whole string: leading space on the first line is
@@ -1397,7 +1428,10 @@ function recordTouchedFiles() {
     }
     const dir = path.posix.dirname(filePath);
     const candidate = dir && dir !== '.' ? dir : filePath;
-    if (!fs.existsSync(path.join(ROOT, candidate))) continue;
+    // Skip harness-owned paths even when the harness directory lives inside root-repo.
+    // Context auto-learning should track user-project files only.
+    if (isHarnessOwnedContextPath(candidate, repoRoot)) continue;
+    if (!fs.existsSync(path.join(repoRoot, candidate))) continue;
     touchedDirs.add(candidate);
   }
 }
@@ -1442,6 +1476,8 @@ function validateTouchedJsonFilesOrThrow() {
   }
 }
 
+// Age, drop, and append `context-files` entries relative to the topic's `root-repo`
+// so stale harness paths are removed and newly-touched project paths are retained.
 function updateTopicContext() {
   if (!(topicConfig.autoContext ?? true)) return;
   const maxLifespan = topicConfig.maxContextLifespan;
@@ -1453,7 +1489,13 @@ function updateTopicContext() {
   );
   const existing = [];
   for (const e of normalized) {
-    if (fs.existsSync(path.join(ROOT, e.path))) {
+    // Drop harness-owned entries from persisted context-files so stale auto-context from
+    // prior runs stops polluting future prompts even when those paths still exist on disk.
+    if (isHarnessOwnedContextPath(e.path, repoRoot)) {
+      console.warn(`[context-hygiene] dropping harness-owned context-files entry: "${e.path}"`);
+      continue;
+    }
+    if (fs.existsSync(path.join(repoRoot, e.path))) {
       existing.push(e);
     } else {
       console.warn(`[context-hygiene] dropping non-existent context-files entry: "${e.path}"`);
@@ -1469,7 +1511,10 @@ function updateTopicContext() {
 
   const existingPaths = new Set(updated.map(e => e.path));
   for (const dir of touchedDirs) {
-    if (!existingPaths.has(dir) && fs.existsSync(path.join(ROOT, dir))) updated.push({ path: dir, age: 0 });
+    // Never promote harness-owned directories into topic context. The topic's root-repo
+    // may contain the harness checkout, but those files are implementation detail here.
+    if (isHarnessOwnedContextPath(dir, repoRoot)) continue;
+    if (!existingPaths.has(dir) && fs.existsSync(path.join(repoRoot, dir))) updated.push({ path: dir, age: 0 });
   }
 
   topicConfig['context-files'] = updated;

@@ -129,6 +129,26 @@ function managedBlockHasStubs(content) {
   return Boolean(match && match[0].includes(STUB_HINT));
 }
 
+// Build the canonical managed block (header comments + rendered source) wrapped in
+// the BEGIN/END sentinels. Single source of truth so install() and the CLI body
+// produce byte-identical blocks and staleness comparison stays accurate.
+function renderBlock(sourceContent) {
+  return `${BEGIN}\n# Managed by Agent_Orchestrator/install-shell-functions.js — do not edit by hand.\n# Re-run with --force to refresh this block.\n${sourceContent.trimEnd()}\n${END}\n`;
+}
+
+// Detect a stale managed block: present in the rc file but whose content no longer
+// matches the freshly-rendered block (e.g. new functions like hrestoretopic were
+// added to shell-functions.txt after the last install). Without this, a plain
+// re-run hits the "block already present" skip and never updates, leaving the user
+// with missing functions and "command not found". CRLF is normalized so a file
+// edited on Windows isn't reported stale purely due to line endings.
+function isBlockStale(content, sourceContent) {
+  const m = content.match(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`));
+  if (!m) return false;
+  const norm = s => s.replace(/\r\n/g, '\n').trimEnd();
+  return norm(m[0]) !== norm(renderBlock(sourceContent));
+}
+
 // Programmatic install entry (CLI re-implements this below to support exit codes).
 // Detects existing managed block / conflicting unmanaged definitions, then writes
 // or refreshes the block in each target rc file (.bashrc, .zshrc).
@@ -163,6 +183,9 @@ function install({ force = false } = {}) {
       let content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
       const hasBlock = content.includes(BEGIN) && content.includes(END);
       const blockHasStubs = managedBlockHasStubs(content);
+      // Stale = installed block diverges from current source → must refresh even
+      // without --force, else newly-added functions never reach the rc file.
+      const blockIsStale = hasBlock && isBlockStale(content, sourceContent);
       let outsideBlock = hasBlock
         ? content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`), '')
         : content;
@@ -174,7 +197,7 @@ function install({ force = false } = {}) {
       }
       const conflicts = allKnown.filter(name => new RegExp(`^\\s*${name}\\s*\\(\\)`, 'm').test(outsideBlock));
 
-      if (!force && hasBlock && !blockHasStubs) {
+      if (!force && hasBlock && !blockHasStubs && !blockIsStale) {
         ok(`${shell}: managed block already present in ${file} — no changes`);
         skippedCount++;
         continue;
@@ -185,9 +208,11 @@ function install({ force = false } = {}) {
         continue;
       }
 
-      const block = `${BEGIN}\n# Managed by Agent_Orchestrator/install-shell-functions.js — do not edit by hand.\n# Re-run with --force to refresh this block.\n${sourceContent.trimEnd()}\n${END}\n`;
+      const block = renderBlock(sourceContent);
       let next;
-      if (hasBlock && (force || blockHasStubs)) {
+      // Refresh in place when forced, when the block held stubs, or when it is
+      // stale (out of sync with current source).
+      if (hasBlock && (force || blockHasStubs || blockIsStale)) {
         next = content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}\\n?`), block);
       } else {
         if (!hasBlock && stubInfo.removed) {
@@ -283,6 +308,9 @@ for (const { shell, file } of targets) {
     // Check if our managed block is already present.
     const hasBlock = content.includes(BEGIN) && content.includes(END);
     const blockHasStubs = managedBlockHasStubs(content);
+    // Stale = installed block diverges from current source → must refresh even
+    // without --force, else newly-added functions never reach the rc file.
+    const blockIsStale = hasBlock && isBlockStale(content, sourceContent);
 
     // Check if any of our function names are already defined outside our block.
     let outsideBlock = hasBlock
@@ -296,7 +324,7 @@ for (const { shell, file } of targets) {
     }
     const conflicts = allKnown.filter(name => new RegExp(`^\\s*${name}\\s*\\(\\)`, 'm').test(outsideBlock));
 
-    if (!FORCE && hasBlock && !blockHasStubs) {
+    if (!FORCE && hasBlock && !blockHasStubs && !blockIsStale) {
       ok(`${shell}: managed block already present in ${file} — no changes`);
       skippedCount++;
       continue;
@@ -307,10 +335,12 @@ for (const { shell, file } of targets) {
       continue;
     }
 
-    const block = `${BEGIN}\n# Managed by Agent_Orchestrator/install-shell-functions.js — do not edit by hand.\n# Re-run with --force to refresh this block.\n${sourceContent.trimEnd()}\n${END}\n`;
+    const block = renderBlock(sourceContent);
 
     let next;
-    if (hasBlock && (FORCE || blockHasStubs)) {
+    // Refresh in place when forced, when the block held stubs, or when it is
+    // stale (out of sync with current source).
+    if (hasBlock && (FORCE || blockHasStubs || blockIsStale)) {
       next = content.replace(new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}\\n?`), block);
     } else {
       if (!hasBlock && stubInfo.removed) {

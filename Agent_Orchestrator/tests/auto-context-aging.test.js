@@ -15,6 +15,8 @@
 //  (8)  auto-context defaults to true when key absent (source-level check)
 //  (9)  max-context-lifespan: no eviction when maxLifespan is undefined/null
 // (10)  context-files key alias: `context` and `contextFiles` treated identically to `context-files`
+// (11)  context-files existence checks resolve against topic `root-repo`, not harness root
+// (12)  harness-owned entries are dropped and never re-added to topic context
 
 const fs   = require('fs');
 const os   = require('os');
@@ -80,18 +82,22 @@ function computeContextUpdate({ contextFiles, touchedDirs, maxLifespan, autoCont
 }
 
 // Pure logic helper that matches the real updateTopicContext algorithm.
-// `warnFn` (optional) is called with the dropped path when an entry fails the existsCheck.
-function runContextUpdate({ autoContext, maxLifespan, sourceEntries, touchedDirs, existingPathsOnDisk, warnFn }) {
+// `warnFn` (optional) is called with the dropped path when an entry is rejected.
+function runContextUpdate({ autoContext, maxLifespan, sourceEntries, touchedDirs, existingPathsOnDisk, warnFn, isHarnessPath }) {
   if (!autoContext) return null;
   const normalized = (sourceEntries || []).map(e =>
     typeof e === 'string' ? { path: e, age: 0 } : e
   );
   const entriesNorm = [];
   for (const e of normalized) {
+    if (isHarnessPath && isHarnessPath(e.path)) {
+      if (warnFn) warnFn(e.path, 'harness');
+      continue;
+    }
     if (existingPathsOnDisk.has(e.path)) {
       entriesNorm.push(e);
     } else if (warnFn) {
-      warnFn(e.path);
+      warnFn(e.path, 'missing');
     }
   }
   const updated = [];
@@ -102,6 +108,7 @@ function runContextUpdate({ autoContext, maxLifespan, sourceEntries, touchedDirs
   }
   const existingPaths = new Set(updated.map(e => e.path));
   for (const dir of touchedDirs) {
+    if (isHarnessPath && isHarnessPath(dir)) continue;
     if (!existingPaths.has(dir)) updated.push({ path: dir, age: 0 });
   }
   return updated;
@@ -272,6 +279,40 @@ test('(11) typo path like "laude_Code_Harness" is dropped and a warning is emitt
     'exactly one warning must be emitted for the typo entry');
   assert.strictEqual(warned[0], 'laude_Code_Harness',
     'warning must name the bad path');
+});
+
+// Requirement quote: "The Harness has just addressed the first prompt in the new topic "hackathon". I see a problem where the first context files it adds to the topic config are not context files within the root repo but are rather context files within the Agent_Orchestrator harness root itself."
+test('(12) run-agent.js updateTopicContext resolves context-files against repoRoot', () => {
+  const fnMatch = runAgentSrc.match(/function updateTopicContext\(\)[\s\S]*?function /);
+  assert.ok(fnMatch, 'could not locate updateTopicContext function body');
+  assert.ok(/path\.join\(repoRoot,\s*e\.path\)/.test(fnMatch[0]),
+    'existing context entries must be resolved under repoRoot');
+  assert.ok(/path\.join\(repoRoot,\s*dir\)/.test(fnMatch[0]),
+    'new touched dirs must be resolved under repoRoot');
+});
+
+test('(13) harness-owned entries are dropped and never re-added to topic context', () => {
+  const warned = [];
+  const result = runContextUpdate({
+    autoContext: true,
+    maxLifespan: null,
+    sourceEntries: [
+      { path: 'Agent_Orchestrator/src', age: 0 },
+      { path: 'docs', age: 2 },
+    ],
+    touchedDirs: new Set(['Agent_Orchestrator/tests', 'docs']),
+    existingPathsOnDisk: new Set(['Agent_Orchestrator/src', 'Agent_Orchestrator/tests', 'docs']),
+    warnFn: (p, kind) => warned.push({ path: p, kind }),
+    isHarnessPath: p => p === 'Agent_Orchestrator/src' || p === 'Agent_Orchestrator/tests',
+  });
+
+  assert.ok(!result.find(e => e.path.startsWith('Agent_Orchestrator/')),
+    'harness-owned entries must be excluded from the updated context list');
+  const docs = result.find(e => e.path === 'docs');
+  assert.ok(docs, 'non-harness project entry must remain');
+  assert.strictEqual(docs.age, 0, 'non-harness touched entry must still refresh normally');
+  assert.deepStrictEqual(warned, [{ path: 'Agent_Orchestrator/src', kind: 'harness' }],
+    'existing harness-owned entries must be warned-and-dropped exactly once');
 });
 
 if (_failed === 0) console.log('\nAll auto-context-aging tests passed.');

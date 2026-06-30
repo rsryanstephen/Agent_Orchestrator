@@ -177,4 +177,25 @@ test('(13) targets always starts with candidates[0] (.bash_profile) regardless o
   );
 });
 
+// ── (14) stale managed block is auto-refreshed without --force ────────────────
+// Regression: a block missing newly-added functions (e.g. hrestoretopic) must be
+// detected as stale and refreshed on a plain re-run, else the user keeps getting
+// "command not found" until they discover --force.
+test('(14) source detects a stale managed block and refreshes it without --force', () => {
+  assert.ok(/function isBlockStale/.test(installSrc),
+    'install source must define isBlockStale to detect out-of-date managed blocks');
+  assert.ok(/blockIsStale\s*=\s*hasBlock && isBlockStale\(/.test(installSrc),
+    'install source must compute blockIsStale from isBlockStale()');
+  // The idempotent-skip guard must NOT skip when the block is stale.
+  assert.ok(/!FORCE && hasBlock && !blockHasStubs && !blockIsStale/.test(installSrc),
+    'CLI skip guard must also require !blockIsStale so stale blocks are refreshed');
+  assert.ok(/!force && hasBlock && !blockHasStubs && !blockIsStale/.test(installSrc),
+    'install() skip guard must also require !blockIsStale so stale blocks are refreshed');
+  // The refresh branch must fire on staleness too.
+  assert.ok(/hasBlock && \(FORCE \|\| blockHasStubs \|\| blockIsStale\)/.test(installSrc),
+    'CLI refresh branch must include blockIsStale');
+  assert.ok(/hasBlock && \(force \|\| blockHasStubs \|\| blockIsStale\)/.test(installSrc),
+    'install() refresh branch must include blockIsStale');
+});
+
 if (_failed === 0) console.log('\nAll install-shell-functions tests passed.');

@@ -51,6 +51,11 @@ test('useAbsolute logic present', () => {
   assert.ok(/path\.resolve\(agentCwd\).*!==.*path\.resolve\(baseRoot\)/.test(runAgentSrc), 'useAbsolute comparison absent');
 });
 
+test('buildContextSection filters harness-owned context entries', () => {
+  assert.ok(/isHarnessOwnedContextPath\(p,\s*baseRoot\)/.test(runAgentSrc),
+    'buildContextSection must exclude harness-owned context entries');
+});
+
 test('directory expansion: mtime sort + 20-file cap present', () => {
   assert.ok(/files\.sort\(.*mtime/.test(runAgentSrc), 'mtime sort absent');
   assert.ok(/files\.length\s*>\s*20/.test(runAgentSrc), '20-file cap absent');
@@ -170,6 +175,22 @@ test('activeHistoryRel entry excluded from output', () => {
     const result = fn(['history.md', 'code.js'], 'history.md', tmpRoot);
     assert.ok(!result.includes('- history.md'), 'activeHistoryRel should be excluded from file list');
     assert.ok(result.includes('code.js'), 'other entries should remain');
+  } finally { fs.rmSync(tmpRoot, { recursive: true, force: true }); }
+});
+
+test('harness-owned context entries are excluded from rendered output', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-test-'));
+  try {
+    const mockHarness = path.join(tmpRoot, 'Agent_Orchestrator');
+    fs.mkdirSync(path.join(mockHarness, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(mockHarness, 'src', 'run-agent.js'), '');
+    fs.writeFileSync(path.join(tmpRoot, 'app.js'), '');
+    const fn = makeFn(tmpRoot, mockHarness);
+    const result = fn(['Agent_Orchestrator/src', 'app.js'], null, tmpRoot, tmpRoot);
+    assert.ok(!result.includes('Agent_Orchestrator/src'),
+      'harness-owned context entry must be excluded from rendered output');
+    assert.ok(result.includes('- app.js'),
+      'non-harness project entry must remain in rendered output');
   } finally { fs.rmSync(tmpRoot, { recursive: true, force: true }); }
 });
 
